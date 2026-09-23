@@ -1,0 +1,15 @@
+{
+  "name": "pom-plugin-deepseek-harness-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Embedded UI shell that mounts the official DeepSeek Harness inside the POM.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

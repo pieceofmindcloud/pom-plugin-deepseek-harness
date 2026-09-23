@@ -1,0 +1,24 @@
+{
+  "schema": "pom-plugin-ui/v1",
+  "plugin_code": "deepseek_harness",
+  "menu": [
+    {
+      "id": "harness",
+      "label": { "en": "Deepseek Harness", "pt-BR": "Deepseek Harness" },
+      "icon": "terminal",
+      "to": "/harness",
+      "roles": ["admin"]
+    }
+  ],
+  "routes": [
+    { "path": "/harness", "screen": "harness", "full_bleed": true, "roles": ["admin"] }
+  ],
+  "screens": {
+    "harness": { "module": "ui/screens.js", "export": "harness", "styles": ["ui/plugin.css"] }
+  },
+  "i18n": {
+    "en": "i18n/en.json",
+    "pt-BR": "i18n/pt-BR.json"
+  },
+  "assets": ["ui/screens.js", "ui/plugin.css", "ui/runtime.json", "i18n/en.json", "i18n/pt-BR.json"]
+}

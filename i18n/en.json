@@ -1,0 +1,7 @@
+{
+  "starting": "Starting DeepSeek Harness…",
+  "startingDetail": "The first start unpacks the bundled runtime and can take a minute.",
+  "loading": "Loading DeepSeek Harness…",
+  "failed": "DeepSeek Harness could not start",
+  "retry": "Try again"
+}

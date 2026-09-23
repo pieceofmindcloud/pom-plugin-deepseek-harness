@@ -1,0 +1,7 @@
+{
+  "starting": "Iniciando o DeepSeek Harness…",
+  "startingDetail": "A primeira inicialização descompacta o runtime embutido e pode levar um minuto.",
+  "loading": "Carregando o DeepSeek Harness…",
+  "failed": "Não foi possível iniciar o DeepSeek Harness",
+  "retry": "Tentar de novo"
+}
