@@ -1,19 +1,21 @@
 // Supervisor of the official DeepSeek Harness inside the POM plugin.
 //
 // The plugin library starts this script with the Node runtime shipped next to
-// it. It boots the unmodified `dsh web` server on a private loopback port,
-// points its pi-ai provider at the POM OpenAI-compatible endpoint, and fronts
-// it with a small proxy the POM page can reach cross-origin. The proxy is the
-// only place that adapts the harness to run inside a POM <div>:
+// it, passing the model endpoint and API key the POM handed over
+// (`DSH_POM_LLM_BASE_URL`, `DSH_POM_LLM_API_KEY`). It boots the unmodified
+// `dsh web` server on a private loopback port, points its pi-ai provider at
+// the POM, and fronts it with a loopback proxy that only the POM node reaches:
+// the node mounts it at `/api/ui/plugins/<code>/proxy` (admin-only) and adds
+// the per-launch token in `x-pom-plugin-token`. The proxy adapts the harness
+// to run inside a POM <div>:
 //
 // - every browser base the harness derives from `location` is redirected to
-//   `globalThis.__DSH_POM__` (set by the plugin screen to this proxy origin);
+//   `globalThis.__DSH_POM__`, which the plugin screen maps to the POM route;
 // - the harness mount point `#root` becomes `#dsh-root` (the POM owns #root);
-// - the harness browser session is established here, server side, so the
-//   browser only presents the per-launch key the plugin publishes.
+// - the harness browser session is established here, server side.
 //
 // Protocol with the plugin library: exactly one JSON line on stdout once
-// ready (`{"status":"ready","port":N,"key":"..."}`) or failed
+// ready (`{"status":"ready","port":N,"token":"..."}`) or failed
 // (`{"status":"error","error":"..."}`). Logs go to stderr. The process exits
 // when stdin closes, so it never outlives the plugin host.
 
@@ -30,16 +32,13 @@ const env = process.env;
 const dataDir = env.DSH_POM_DATA_DIR || join(here, "data");
 const dshHome = join(dataDir, "dsh-home");
 const workspace = env.DSH_POM_WORKSPACE || join(dataDir, "workspace");
-const proxyHost = env.DSH_POM_PROXY_HOST || "127.0.0.1";
-const proxyPort = Number(env.DSH_POM_PROXY_PORT || 0);
-const llmBaseUrl = (env.DSH_POM_LLM_BASE_URL || "http://127.0.0.1:8080/v1").replace(/\/+$/, "");
+const llmBaseUrl = (env.DSH_POM_LLM_BASE_URL || "").replace(/\/+$/, "");
 const llmApiKey = env.DSH_POM_LLM_API_KEY || "";
-// pi-ai refuses a keyless route, so an endpoint that needs no key gets a placeholder.
-const routeApiKey = llmApiKey || "pom-no-key";
 const dshBin = join(here, "app", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
-const KEY_HEADER = "x-dsh-pom-key";
-const KEY_PARAM = "dsh_pom_key";
-const key = randomBytes(32).toString("base64url");
+const TOKEN_HEADER = "x-pom-plugin-token";
+const PREFIX_HEADER = "x-forwarded-prefix";
+const MOUNT_PREFIX = /^\/api\/ui\/plugins\/[a-z0-9][a-z0-9_.-]*\/proxy$/;
+const token = randomBytes(32).toString("base64url");
 
 let child;
 let reported = false;
@@ -68,9 +67,8 @@ function shutdown(code = 0) {
 
 // --- POM models -------------------------------------------------------------
 
-async function pomModels() {
-  const headers = { accept: "application/json" };
-  if (llmApiKey) headers.authorization = `Bearer ${llmApiKey}`;
+async function listPomModels() {
+  const headers = { accept: "application/json", authorization: `Bearer ${llmApiKey}` };
   const response = await fetch(`${llmBaseUrl}/models`, { headers, signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`GET ${llmBaseUrl}/models returned HTTP ${response.status}`);
   const body = await response.json();
@@ -79,6 +77,26 @@ async function pomModels() {
     .map((row) => (typeof row?.id === "string" ? row.id.trim() : ""))
     .filter((id, index, ids) => id && ids.indexOf(id) === index)
     .map((id) => ({ id, name: id }));
+}
+
+/**
+ * The node may still be binding its gateway when it configures the plugin,
+ * and may serve no model yet: retry for a while before starting without the
+ * POM route.
+ */
+async function pomModels(attempts = 20, delayMs = 3000) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const models = await listPomModels();
+      if (models.length > 0) return models;
+      last = new Error(`${llmBaseUrl}/models listed no models`);
+    } catch (error) {
+      last = error;
+    }
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  throw last;
 }
 
 /** Loader overlay (JSON is valid YAML) adapting the stock web profile to run under the POM. */
@@ -120,7 +138,7 @@ function startHarness(overlay) {
       [dshBin, "--profile", "web", "--patch", overlay, "--no-open", "--host", "127.0.0.1", "--port", "0"],
       {
         cwd: workspace,
-        env: { ...env, DSH_HOME: dshHome, HOME: env.HOME || dataDir, DSH_POM_LLM_API_KEY: routeApiKey },
+        env: { ...env, DSH_HOME: dshHome, HOME: env.HOME || dataDir },
         stdio: ["ignore", "pipe", "inherit"],
       },
     );
@@ -188,43 +206,24 @@ const HOP_BY_HOP = new Set([
   "transfer-encoding", "upgrade",
 ]);
 
-function keyMatches(candidate) {
+function tokenMatches(candidate) {
   if (typeof candidate !== "string") return false;
-  const expected = Buffer.from(key);
+  const expected = Buffer.from(token);
   const actual = Buffer.from(candidate);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-/** Static harness code needs no key: classic <script> and CSS loads cannot carry headers. */
-function isPublic(method, url) {
-  if (method !== "GET" && method !== "HEAD") return false;
-  if (url.pathname.startsWith("/assets/") || url.pathname === "/favicon.svg") return true;
-  return url.pathname === "/plugins/" && url.search.startsWith("??");
-}
-
-/** The request target without the key parameter, leaving every other byte of the query intact. */
+/** The request target, exactly as the node forwarded it. */
 export function forwardedPath(rawUrl) {
-  const [path, query] = rawUrl.split(/\?(.*)/s, 2);
-  if (query === undefined) return path;
-  const kept = query.split("&").filter((part) => !part.startsWith(`${KEY_PARAM}=`));
-  return kept.length > 0 ? `${path}?${kept.join("&")}` : path;
+  return rawUrl.startsWith("/") ? rawUrl : `/${rawUrl}`;
 }
 
-function corsHeaders(request) {
-  const origin = request.headers.origin;
-  if (!origin) return {};
-  return {
-    "access-control-allow-origin": origin,
-    "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
-    "access-control-allow-headers": request.headers["access-control-request-headers"] || "*",
-    "access-control-expose-headers": "*",
-    "access-control-allow-private-network": "true",
-    "access-control-max-age": "600",
-    vary: "Origin",
-  };
+/** Where the node mounted this proxy, from `x-forwarded-prefix`; empty when absent or unexpected. */
+export function mountPrefix(value) {
+  return typeof value === "string" && MOUNT_PREFIX.test(value) ? value : "";
 }
 
-/** Redirect every browser base the harness derives from `location` to the proxy. */
+/** Redirect every browser base the harness derives from `location` to `__DSH_POM__`. */
 export function rewriteScript(source) {
   return source
     .replaceAll('getElementById("root")', 'getElementById("dsh-root")')
@@ -237,7 +236,7 @@ export function rewriteScript(source) {
 function upstreamHeaders(request, upstream, cookie) {
   const headers = {};
   for (const [name, value] of Object.entries(request.headers)) {
-    if (HOP_BY_HOP.has(name) || name === KEY_HEADER || name === "cookie" || name === "referer") continue;
+    if (HOP_BY_HOP.has(name) || name.startsWith("x-forwarded-") || name === TOKEN_HEADER || name === "cookie" || name === "referer") continue;
     headers[name] = value;
   }
   headers.host = upstream;
@@ -250,12 +249,20 @@ function upstreamHeaders(request, upstream, cookie) {
 
 /**
  * The harness index, decomposed into the ordered boot steps the plugin
- * screen replays inside the POM document, with every URL made absolute.
+ * screen replays inside the POM document, with every URL made root-relative
+ * under the node's mount prefix.
  */
-function bootPlan(html, base) {
+export function bootPlan(html, prefix) {
   const steps = [];
   const styles = [];
-  const absolute = (value) => new URL(value.replaceAll("&amp;", "&"), `${base}/`).href;
+  const absolute = (value) => {
+    const decoded = value.replaceAll("&amp;", "&");
+    // Root-relative harness paths keep their shape under the prefix; the URL
+    // parser would drop the prefix and re-encode the `/plugins/??` query.
+    if (decoded.startsWith("/")) return `${prefix}${decoded}`;
+    const url = new URL(decoded, `http://mount.invalid${prefix}/`);
+    return `${url.pathname}${url.search}`;
+  };
   const tag = /<script\b([^>]*)>([\s\S]*?)<\/script>|<link\b([^>]*)>/gi;
   for (const match of html.matchAll(tag)) {
     if (match[3] !== undefined) {
@@ -269,29 +276,23 @@ function bootPlan(html, base) {
     if (src) {
       steps.push({ kind: /\btype="module"/.test(attributes) ? "module" : "script", url: absolute(src) });
     } else if (match[2].trim()) {
-      const code = rewriteScript(match[2]).replace(/"url":"\//g, `"url":"${base}/`);
+      const code = rewriteScript(match[2]).replace(/"url":"\//g, `"url":"${prefix}/`);
       steps.push({ kind: "inline", code });
     }
   }
-  return { base, steps, styles };
+  return { prefix, steps, styles };
 }
 
 function startProxy(port, cookie) {
   const upstream = `127.0.0.1:${port}`;
   const server = http.createServer((request, response) => {
-    const url = new URL(request.url, "http://proxy.invalid");
-    const cors = corsHeaders(request);
-    if (request.method === "OPTIONS") {
-      response.writeHead(204, cors).end();
-      return;
-    }
-    const presented = request.headers[KEY_HEADER] ?? url.searchParams.get(KEY_PARAM);
-    if (!isPublic(request.method, url) && !keyMatches(presented)) {
-      response.writeHead(401, { ...cors, "content-type": "text/plain" }).end("missing or invalid plugin key");
+    if (!tokenMatches(request.headers[TOKEN_HEADER])) {
+      response.writeHead(401, { "content-type": "text/plain" }).end("missing or invalid plugin token");
       return;
     }
     const path = forwardedPath(request.url);
-    const isBoot = url.pathname === "/__pom/boot";
+    const isBoot = new URL(path, "http://proxy.invalid").pathname === "/__pom/boot";
+    const prefix = mountPrefix(request.headers[PREFIX_HEADER]);
 
     const outbound = http.request(
       {
@@ -302,7 +303,7 @@ function startProxy(port, cookie) {
         headers: upstreamHeaders(request, upstream, cookie),
       },
       (reply) => {
-        const headers = { ...cors };
+        const headers = {};
         for (const [name, value] of Object.entries(reply.headers)) {
           if (HOP_BY_HOP.has(name) || name === "set-cookie" || name === "cross-origin-resource-policy") continue;
           headers[name] = value;
@@ -318,8 +319,7 @@ function startProxy(port, cookie) {
         reply.on("data", (chunk) => chunks.push(chunk));
         reply.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
-          const base = `http://${request.headers.host}`;
-          const body = isBoot ? JSON.stringify(bootPlan(text, base)) : rewriteScript(text);
+          const body = isBoot ? JSON.stringify(bootPlan(text, prefix)) : rewriteScript(text);
           delete headers.etag;
           headers["content-type"] = isBoot ? "application/json" : type;
           headers["content-length"] = Buffer.byteLength(body);
@@ -330,15 +330,14 @@ function startProxy(port, cookie) {
     );
     outbound.on("error", (error) => {
       log(`proxy ${request.method} ${path}: ${error.message}`);
-      if (!response.headersSent) response.writeHead(502, cors);
+      if (!response.headersSent) response.writeHead(502);
       response.end();
     });
     request.pipe(outbound);
   });
 
   server.on("upgrade", (request, socket, head) => {
-    const url = new URL(request.url, "http://proxy.invalid");
-    if (!keyMatches(url.searchParams.get(KEY_PARAM))) {
+    if (!tokenMatches(request.headers[TOKEN_HEADER])) {
       socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
       return;
     }
@@ -366,13 +365,14 @@ function startProxy(port, cookie) {
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(proxyPort, proxyHost, () => resolve(server.address().port));
+    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
   });
 }
 
 // --- Main -------------------------------------------------------------------
 
 async function main() {
+  if (!llmBaseUrl || !llmApiKey) throw new Error("the POM did not provide DSH_POM_LLM_BASE_URL and DSH_POM_LLM_API_KEY");
   for (const directory of [dataDir, dshHome, workspace]) mkdirSync(directory, { recursive: true });
   let models = [];
   let warning;
@@ -390,8 +390,8 @@ async function main() {
     log(error.message);
   });
   const port = await startProxy(harness.port, cookie);
-  log(`proxy on ${proxyHost}:${port} -> harness 127.0.0.1:${harness.port}; ${models.length} POM model(s)`);
-  report({ status: "ready", port, key, models: models.map((model) => model.id), warning });
+  log(`proxy on 127.0.0.1:${port} -> harness 127.0.0.1:${harness.port}; ${models.length} POM model(s)`);
+  report({ status: "ready", port, token, models: models.map((model) => model.id), warning });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

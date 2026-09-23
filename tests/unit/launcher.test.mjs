@@ -1,12 +1,37 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { forwardedPath, rewriteScript } from "../../runtime/launcher.mjs";
+import { bootPlan, forwardedPath, mountPrefix, rewriteScript } from "../../runtime/launcher.mjs";
 
-test("the key parameter is removed without re-encoding the rest of the query", () => {
+test("the forwarded target keeps every byte of the query", () => {
   assert.equal(forwardedPath("/plugins/??@a/b.js,@c/d.js&rev=1"), "/plugins/??@a/b.js,@c/d.js&rev=1");
-  assert.equal(forwardedPath("/api/remote.mux?a=1&dsh_pom_key=k&b=2"), "/api/remote.mux?a=1&b=2");
-  assert.equal(forwardedPath("/api/x?dsh_pom_key=k"), "/api/x");
   assert.equal(forwardedPath("/"), "/");
+});
+
+test("only a plugin proxy route is accepted as the mount prefix", () => {
+  assert.equal(mountPrefix("/api/ui/plugins/deepseek_harness/proxy"), "/api/ui/plugins/deepseek_harness/proxy");
+  assert.equal(mountPrefix("/api/ui/plugins/deepseek_harness/proxy/extra"), "");
+  assert.equal(mountPrefix("https://evil.example/"), "");
+  assert.equal(mountPrefix(undefined), "");
+});
+
+test("the boot plan points every harness URL under the mount prefix", () => {
+  const html = [
+    '<base href="/">',
+    '<script>globalThis["__DSH_BOOT__"] = {"entries":[{"url":"/plugins/??@x/client.js&rev=1"}]}</script>',
+    '<script src="/plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=2"></script>',
+    '<script type="module" crossorigin src="./assets/index-A.js"></script>',
+    '<link rel="stylesheet" crossorigin href="./assets/index-B.css">',
+    '<link rel="modulepreload" crossorigin href="./assets/vendor-C.js">',
+  ].join("\n");
+  const plan = bootPlan(html, "/api/ui/plugins/demo/proxy");
+  assert.deepEqual(plan.styles, ["/api/ui/plugins/demo/proxy/assets/index-B.css"]);
+  assert.deepEqual(
+    plan.steps.map((step) => step.kind),
+    ["inline", "script", "module"],
+  );
+  assert.match(plan.steps[0].code, /"url":"\/api\/ui\/plugins\/demo\/proxy\/plugins\/\?\?@x\/client\.js&rev=1"/);
+  assert.equal(plan.steps[1].url, "/api/ui/plugins/demo/proxy/plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=2");
+  assert.equal(plan.steps[2].url, "/api/ui/plugins/demo/proxy/assets/index-A.js");
 });
 
 test("harness bundles resolve their origin and mount point through the plugin", () => {

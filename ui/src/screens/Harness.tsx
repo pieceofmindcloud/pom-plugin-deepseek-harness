@@ -1,22 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { mountHarness, parkHarness, type HarnessRuntime } from "../harness/mount";
+import { mountHarness, parkHarness } from "../harness/mount";
 import { getPluginAsset, usePluginI18n } from "../host/runtime";
 
-type RuntimeStatus =
-  | HarnessRuntime
-  | { status: "starting" }
-  | { status: "error"; error: string };
+/** `ui/runtime.json`: whether the harness is up. The POM proxy knows where it runs. */
+type RuntimeStatus = { status: "ready" } | { status: "starting" } | { status: "error"; error: string };
 
 type Phase = { kind: "starting" } | { kind: "loading" } | { kind: "ready" } | { kind: "error"; message: string };
 
 const POLL_MS = 1000;
 const START_TIMEOUT_MS = 180_000;
 
-async function readyRuntime(signal: AbortSignal): Promise<HarnessRuntime> {
+async function waitUntilReady(signal: AbortSignal): Promise<void> {
   const deadline = Date.now() + START_TIMEOUT_MS;
   for (;;) {
     const runtime = await getPluginAsset<RuntimeStatus>("ui/runtime.json");
-    if (runtime.status === "ready") return runtime;
+    if (runtime.status === "ready") return;
     if (runtime.status === "error") throw new Error(runtime.error);
     if (Date.now() > deadline) throw new Error("timed out waiting for the harness runtime");
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
@@ -34,11 +32,11 @@ export function Harness() {
   useEffect(() => {
     const controller = new AbortController();
     setPhase({ kind: "starting" });
-    readyRuntime(controller.signal)
-      .then((runtime) => {
+    waitUntilReady(controller.signal)
+      .then(() => {
         if (controller.signal.aborted || !slot.current) return;
         setPhase({ kind: "loading" });
-        return mountHarness(runtime, slot.current).then(() => {
+        return mountHarness(slot.current).then(() => {
           if (!controller.signal.aborted) setPhase({ kind: "ready" });
         });
       })

@@ -1,12 +1,14 @@
 //! POM plugin that runs the official DeepSeek Harness inside the POM.
 //!
 //! The library only supervises: it embeds the UI shell and the harness
-//! runtime archive, starts the runtime when the host creates the plugin, and
-//! publishes the runtime status as the dynamic `ui/runtime.json` asset.
+//! runtime archive, starts the runtime once the POM hands over its model
+//! endpoint (`host.configure`), tells the POM where the harness web server is
+//! (`ui.upstream`, for the node's plugin proxy), and publishes the runtime
+//! status as the dynamic `ui/runtime.json` asset.
 
 mod supervisor;
 
-use supervisor::Supervisor;
+use supervisor::{Gateway, Supervisor};
 
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_void};
@@ -115,6 +117,13 @@ fn query_inner(state: &PluginState, request: &[u8]) -> Result<Value, String> {
     let request: Value = serde_json::from_slice(request).map_err(|error| error.to_string())?;
     match request["operation"].as_str().unwrap_or_default() {
         "ui.manifest" => ui_manifest(),
+        "host.configure" => {
+            state
+                .supervisor
+                .configure(Gateway::from_configure(&request)?);
+            Ok(json!({"status": "configured"}))
+        }
+        "ui.upstream" => Ok(state.supervisor.status().upstream_json()),
         "ui.asset" => {
             let path = request["path"].as_str().ok_or("asset path is missing")?;
             if path == RUNTIME_ASSET {
@@ -147,7 +156,7 @@ unsafe extern "C" fn create(_: HostCallbacks, config: ByteSlice) -> PluginHandle
         if !config.is_empty() {
             serde_json::from_slice::<Value>(config).map_err(|error| error.to_string())?;
         }
-        let supervisor = Supervisor::start(RUNTIME_ARCHIVE, RUNTIME_SHA256);
+        let supervisor = Supervisor::new(RUNTIME_ARCHIVE, RUNTIME_SHA256);
         Ok::<_, String>(Box::into_raw(Box::new(PluginState { supervisor })).cast::<c_void>())
     }));
     match result {

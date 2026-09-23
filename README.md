@@ -4,39 +4,36 @@ Runs the official [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 
 This repository holds no harness code. Every build installs the official prebuilt `@deepseek-ai/dsh` release from npm (default dist-tag `latest`) and wraps it as a POM plugin.
 
-> Test implementation. See [Known limitations](#known-limitations) before using it outside a trusted machine.
+> Test implementation. See [Known limitations](#known-limitations).
 
 ## How it works
 
 ```text
 POM admin UI (/admin-ui/deepseek_harness/harness)
   └─ plugin screen (ui/) ── mounts the harness web client into <div id="dsh-root">
-        │  CSS scoped to #dsh-root, requests carry the per-launch key
+        │  CSS scoped to #dsh-root; same-origin requests, POM session
         ▼
-  launcher proxy  http://<pom host>:<port>        (runtime/launcher.mjs)
+  POM node  /api/ui/plugins/deepseek_harness/proxy/*   (admin-only plugin proxy)
+        │  adds x-pom-plugin-token and x-forwarded-prefix, strips POM credentials
+        ▼
+  launcher proxy  127.0.0.1:<port>          (runtime/launcher.mjs)
         │  rewrites the harness bundles' origin and #root, holds the harness session
         ▼
   dsh web  127.0.0.1:<port>   (official @deepseek-ai/dsh, unmodified)
         │  pi-ai provider "pom" + default agent model
         ▼
-  POM OpenAI-compatible endpoint  (DSH_POM_LLM_BASE_URL, default http://127.0.0.1:8080/v1)
+  POM OpenAI-compatible endpoint  (handed over by the POM in host.configure)
 ```
 
-- `src/` - the `cdylib` the POM loads (`pom_deepseek_harness_plugin_v1`). It embeds the UI and the runtime archive, unpacks the runtime once per checksum under the plugin data directory, starts the launcher, and serves its status as the dynamic `ui/runtime.json` asset.
-- `runtime/launcher.mjs` - starts `dsh web` on loopback with a loader overlay. The overlay registers the POM models (from `GET /v1/models`), makes the first one the default, and selects the in-page workspace picker. The launcher also registers the plugin working directory as a workspace and fronts everything with the proxy.
-- `ui/` - the plugin screen and the CSS scoper. `scripts/fetch-runtime.sh` - portable Node.js plus `npm install @deepseek-ai/dsh@<tag>`, packed as the archive the library embeds.
+- `src/` is the `cdylib` the POM loads (`pom_deepseek_harness_plugin_v1`). It embeds the UI and the runtime archive, and answers three `query` operations besides `ui.manifest` and `ui.asset`:
+  - `host.configure`: the POM hands over `gateway.openai_base_url` and `gateway.api_key`. The library then unpacks the runtime once per checksum under the plugin data directory and starts the launcher with those values. A new configuration restarts it.
+  - `ui.upstream`: tells the POM proxy the launcher's loopback port and per-launch token.
+  - `ui/runtime.json`: the status the screen polls. It carries neither the port nor the token.
+- `runtime/launcher.mjs` starts `dsh web` on loopback with a loader overlay. The overlay registers the POM models (from `GET /v1/models`, retried while the node starts), makes the first one the default, and selects the in-page workspace picker. The launcher also registers the plugin working directory as a workspace. It serves only requests that carry the POM's token.
+- `ui/` holds the plugin screen and the CSS scoper.
+- `scripts/fetch-runtime.sh` installs a portable Node.js plus `@deepseek-ai/dsh@<tag>` from npm, packed as the archive the library embeds.
 
-## Configuration
-
-Environment variables seen by the POM node process, which the plugin host inherits:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `DSH_POM_LLM_BASE_URL` | `http://127.0.0.1:8080/v1` | POM OpenAI-compatible endpoint |
-| `DSH_POM_LLM_API_KEY` | none | Bearer key for that endpoint, if it needs one |
-| `DSH_POM_PROXY_HOST` | `127.0.0.1` | Proxy bind address; `0.0.0.0` lets browsers on other machines reach it |
-| `DSH_POM_PROXY_PORT` | random | Fixed proxy port |
-| `DSH_POM_WORKSPACE` | `<data>/workspace` | Directory registered as the default workspace |
+The model endpoint and key never come from the build or from environment variables: the POM provides them. It requires a POM with the plugin proxy and `host.configure` (branch `feat/plugin-ui-proxy` of the `pom` repository).
 
 ## Build and verify
 
@@ -56,20 +53,22 @@ Build on the target platform: the npm install resolves native dependencies (`nod
 
 ## End-to-end test
 
-`tests/e2e/pom-stub.mjs` serves a real POM admin UI build (from the `pom` repository, branch `feat/enterprise`, `apps/frontend`) and implements the plugin UI contract with the real `pom-plugin-host` loading the packaged library. `tests/e2e/mock-pom-llm.mjs` stands in for the POM model endpoint.
+`tests/e2e/pom-stub.mjs` serves a real POM admin UI build (from the `pom` repository, `apps/frontend`) and mirrors the node's plugin contract: the UI assets, `host.configure`, and the `/api/ui/plugins/:code/proxy/*` route. It uses the real `pom-plugin-host` loading the packaged library. `tests/e2e/mock-pom-llm.mjs` stands in for the POM model endpoint and, with `MOCK_LLM_API_KEY`, rejects any request without that key.
 
 ```sh
-MOCK_LLM_PORT=18431 node tests/e2e/mock-pom-llm.mjs &
+MOCK_LLM_PORT=18431 MOCK_LLM_API_KEY=sk-e2e node tests/e2e/mock-pom-llm.mjs &
 POM_FRONTEND_DIST=<pom>/apps/frontend/dist POM_PLUGIN_HOST=<pom>/target/release/pom-plugin-host \
 POM_PLUGIN_LIBRARY=$PWD/dist-release/pom-plugin-deepseek-harness-macos-aarch64.dylib \
-DSH_POM_LLM_BASE_URL=http://127.0.0.1:18431/v1 node tests/e2e/pom-stub.mjs
+POM_STUB_LLM_BASE_URL=http://127.0.0.1:18431/v1 POM_STUB_API_KEY=sk-e2e node tests/e2e/pom-stub.mjs
 # open http://127.0.0.1:18480/admin-ui/deepseek_harness/harness
 ```
+
+The node side of the contract is tested in the `pom` repository (`plugin_proxy` and `plugins::tests::host_context_and_ui_proxy_reach_a_real_plugin_host`).
 
 ## Known limitations
 
 - **Portals and modals are not adapted yet.** Harness dialogs, menus and notices render as children of `<body>`, outside `#dsh-root`, so they appear unstyled at the bottom of the page. Examples: the first-run notice, the workspace picker, the model menu and Settings.
-- **The proxy is not behind POM authentication.** Its key is published through `ui/runtime.json`, and the POM asset route is not admin-only. Anyone who can read that asset can drive the harness, which runs shell commands on the node. The proxy therefore binds to loopback by default. The robust design is an admin-only reverse-proxy route in the POM node itself (`/api/ui/plugins/:code/proxy/*`).
-- **Plain HTTP on a separate port.** A POM served over HTTPS would block it as mixed content.
 - **Bundle rewriting depends on current harness internals.** The rewrites cover `location.origin`, `#root` and the HMR event source. The harness is a developer preview, so a new release can require adjusting them.
+- **The POM model list is read when the harness starts.** Models deployed later appear after the plugin restarts.
+- **The harness runs as the POM user.** It uses that user's home directory, including any agent skills found there, and the POM API key it receives is the node's chat key.
 - **The harness theme follows its own setting**, not the POM theme.

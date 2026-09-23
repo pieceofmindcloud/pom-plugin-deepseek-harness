@@ -1,15 +1,23 @@
 // Minimal POM node for end-to-end tests of this plugin: it serves a real POM
-// admin UI build and implements the plugin UI contract (`pom-plugin-ui/v1`)
-// the way `crates/node/src/plugin_ui.rs` does, backed by the real
-// `pom-plugin-host` loading the real plugin library. Every other /api route
-// answers 404, which the POM UI treats as an optional feature being absent.
+// admin UI build and implements the plugin contract the way the node does,
+// backed by the real `pom-plugin-host` loading the real plugin library:
+// - the UI contract (`pom-plugin-ui/v1`, `crates/node/src/plugin_ui.rs`);
+// - `host.configure` with the node's model endpoint and API key
+//   (`crates/node/src/plugins.rs`, `spawn_host_context`);
+// - the plugin UI proxy `/api/ui/plugins/:code/proxy/*` over `ui.upstream`
+//   (`crates/node/src/plugin_proxy.rs`).
+// Every other /api route answers 404, which the POM UI treats as an optional
+// feature being absent.
 //
 // Usage:
 //   POM_FRONTEND_DIST=<apps/frontend/dist> POM_PLUGIN_HOST=<pom-plugin-host> \
-//   POM_PLUGIN_LIBRARY=<abs path to the cdylib> node tests/e2e/pom-stub.mjs
+//   POM_PLUGIN_LIBRARY=<abs path to the cdylib> \
+//   POM_STUB_LLM_BASE_URL=http://127.0.0.1:18431/v1 POM_STUB_API_KEY=sk-e2e \
+//   node tests/e2e/pom-stub.mjs
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { extname, join, normalize, resolve } from "node:path";
 
 const env = process.env;
@@ -19,6 +27,9 @@ const library = resolve(env.POM_PLUGIN_LIBRARY ?? "");
 const port = Number(env.POM_STUB_PORT || 18480);
 const dataDir = resolve(env.POM_STUB_DATA || "build/e2e-data");
 const pluginCode = "deepseek_harness";
+const proxyPrefix = `/api/ui/plugins/${pluginCode}/proxy`;
+const llmBaseUrl = env.POM_STUB_LLM_BASE_URL || `http://127.0.0.1:${port}/v1`;
+const apiKey = env.POM_STUB_API_KEY || "sk-e2e";
 // `/api/ui/node` answering is what tells the POM UI this node is past setup.
 const NODE_INFO = {
   node_id: "e2e-node", short_id: "e2e", hostname: "e2e", profile: "admin", network_name: "e2e",
@@ -88,6 +99,8 @@ if (manifest.schema !== "pom-plugin-ui/v1" || manifest.plugin_code !== pluginCod
   throw new Error("plugin manifest does not match the POM contract");
 }
 console.error(`pom-stub: plugin ${pluginCode} ${ready.plugin_version} ready`);
+// Like the node: hand the plugin its model endpoint and key once it runs.
+await ipc("query", { operation: "host.configure", gateway: { openai_base_url: llmBaseUrl, api_key: apiKey } });
 
 // --- HTTP -------------------------------------------------------------------
 
@@ -111,6 +124,96 @@ async function pluginAsset(response, code, asset) {
   }
 }
 
+// --- Plugin UI proxy (mirrors crates/node/src/plugin_proxy.rs) --------------
+
+const DROPPED_REQUEST = new Set([
+  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+  "transfer-encoding", "upgrade", "host", "cookie", "authorization", "x-pom-access-token", "x-pom-plugin-token",
+]);
+const DROPPED_RESPONSE = new Set([
+  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+  "transfer-encoding", "upgrade", "set-cookie",
+]);
+
+function sameOrigin(headers) {
+  const site = headers["sec-fetch-site"];
+  if (site !== undefined && site !== "same-origin" && site !== "none") return false;
+  if (headers.origin === undefined) return true;
+  const authority = headers.origin.replace(/^https?:\/\//, "");
+  return authority !== headers.origin && authority.toLowerCase() === String(headers.host).toLowerCase();
+}
+
+async function upstream() {
+  const reply = await ipc("query", { operation: "ui.upstream" });
+  if (reply.status !== "ready") throw Object.assign(new Error(reply.error ?? "starting"), { status: 503 });
+  return reply;
+}
+
+function upstreamHeaders(request, target) {
+  const headers = {};
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (!DROPPED_REQUEST.has(name)) headers[name] = value;
+  }
+  headers["x-forwarded-host"] = request.headers.host;
+  headers["x-forwarded-proto"] = "http";
+  headers["x-forwarded-prefix"] = proxyPrefix;
+  headers["x-pom-plugin-token"] = target.token;
+  return headers;
+}
+
+function targetPath(url) {
+  const rest = url.slice(proxyPrefix.length);
+  return rest.startsWith("/") ? rest : `/${rest.replace(/^\?/, "?")}`;
+}
+
+async function proxy(request, response) {
+  if (!sameOrigin(request.headers)) return send(response, 403, "origem recusada");
+  let target;
+  try {
+    target = await upstream();
+  } catch (error) {
+    return send(response, error.status ?? 404, error.message);
+  }
+  const outbound = http.request(
+    { host: "127.0.0.1", port: target.port, method: request.method, path: targetPath(request.url), headers: upstreamHeaders(request, target) },
+    (reply) => {
+      const headers = {};
+      for (const [name, value] of Object.entries(reply.headers)) if (!DROPPED_RESPONSE.has(name)) headers[name] = value;
+      response.writeHead(reply.statusCode, headers);
+      reply.pipe(response);
+    },
+  );
+  outbound.on("error", () => (response.headersSent ? response.end() : send(response, 502, "plugin sem resposta")));
+  request.pipe(outbound);
+}
+
+async function proxyUpgrade(request, socket, head) {
+  if (!request.url.startsWith(`${proxyPrefix}/`) || !sameOrigin(request.headers)) return socket.destroy();
+  let target;
+  try {
+    target = await upstream();
+  } catch {
+    return socket.destroy();
+  }
+  const headers = upstreamHeaders(request, target);
+  headers.connection = "Upgrade";
+  headers.upgrade = request.headers.upgrade;
+  const lines = [`${request.method} ${targetPath(request.url)} HTTP/1.1`, `host: 127.0.0.1:${target.port}`];
+  for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
+  const plugin = net.connect(target.port, "127.0.0.1", () => {
+    plugin.write(`${lines.join("\r\n")}\r\n\r\n`);
+    if (head.length > 0) plugin.write(head);
+    plugin.pipe(socket);
+    socket.pipe(plugin);
+  });
+  const close = () => {
+    plugin.destroy();
+    socket.destroy();
+  };
+  plugin.on("error", close);
+  socket.on("error", close);
+}
+
 function staticFile(response, pathname) {
   const relative = normalize(decodeURIComponent(pathname.replace(/^\/admin-ui\/?/, ""))).replace(/^(\.\.[/\\])+/, "");
   let file = join(dist, relative);
@@ -118,9 +221,10 @@ function staticFile(response, pathname) {
   send(response, 200, readFileSync(file), { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
 }
 
-http
+const server = http
   .createServer((request, response) => {
     const url = new URL(request.url, "http://pom.invalid");
+    if (url.pathname === proxyPrefix || url.pathname.startsWith(`${proxyPrefix}/`)) return void proxy(request, response);
     const asset = url.pathname.match(/^\/api\/ui\/plugins\/([^/]+)\/assets\/(.+)$/);
     if (request.method === "GET" && url.pathname === "/api/ui/plugins/ui") {
       return send(response, 200, JSON.stringify({ plugins: [{ code: pluginCode, version: ready.plugin_version, manifest }] }), {
@@ -138,6 +242,7 @@ http
     staticFile(response, url.pathname);
   })
   .listen(port, "0.0.0.0", () => console.error(`pom-stub: http://127.0.0.1:${port}/admin-ui/`));
+server.on("upgrade", (request, socket, head) => void proxyUpgrade(request, socket, head));
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, async () => {

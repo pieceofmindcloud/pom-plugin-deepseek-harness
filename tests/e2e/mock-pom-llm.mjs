@@ -1,5 +1,7 @@
 // Stand-in for the POM OpenAI-compatible endpoint in end-to-end tests: one
 // model, and a streamed chat completion that echoes the last user message.
+// With MOCK_LLM_API_KEY set, every request must carry that Bearer key, like
+// the node's `/v1` with its API keys.
 import http from "node:http";
 
 const port = Number(process.env.MOCK_LLM_PORT || 0);
@@ -17,7 +19,13 @@ const server = http.createServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
-    requests.push({ method: request.method, url: request.url });
+    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization ?? null });
+    const expected = process.env.MOCK_LLM_API_KEY;
+    if (expected && request.headers.authorization !== `Bearer ${expected}`) {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "invalid api key" }));
+      return;
+    }
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ object: "list", data: [{ id: model, object: "model", owned_by: "pom" }] }));
