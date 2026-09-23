@@ -5,7 +5,12 @@
 import http from "node:http";
 
 const port = Number(process.env.MOCK_LLM_PORT || 0);
-const model = process.env.MOCK_LLM_MODEL || "pom-test-model";
+// MOCK_LLM_MODELS is a comma-separated list; empty means "no model deployed".
+// POST /__mock/models with a JSON array replaces it while running.
+let models = (process.env.MOCK_LLM_MODELS ?? process.env.MOCK_LLM_MODEL ?? "pom-test-model")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 const requests = [];
 
 function lastUserText(body) {
@@ -20,6 +25,11 @@ const server = http.createServer((request, response) => {
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
     requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization ?? null });
+    if (request.method === "POST" && request.url === "/__mock/models") {
+      models = JSON.parse(Buffer.concat(chunks).toString("utf8") || "[]");
+      response.writeHead(204).end();
+      return;
+    }
     const expected = process.env.MOCK_LLM_API_KEY;
     if (expected && request.headers.authorization !== `Bearer ${expected}`) {
       response.writeHead(401, { "content-type": "application/json" });
@@ -28,13 +38,13 @@ const server = http.createServer((request, response) => {
     }
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ object: "list", data: [{ id: model, object: "model", owned_by: "pom" }] }));
+      response.end(JSON.stringify({ object: "list", data: models.map((id) => ({ id, object: "model", owned_by: "pom" })) }));
       return;
     }
     if (request.method === "POST" && request.url === "/v1/chat/completions") {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
       const text = `POM mock reply: ${lastUserText(body)}`;
-      const base = { id: "chatcmpl-mock", object: "chat.completion.chunk", created: 0, model };
+      const base = { id: "chatcmpl-mock", object: "chat.completion.chunk", created: 0, model: body.model };
       if (!body.stream) {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({

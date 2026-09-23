@@ -6,8 +6,10 @@
 // plugin's launcher already rewrote the harness bundles so their page origin
 // and `#root` are replaceable; this module supplies the rest: the harness
 // origin (`__DSH_POM__`, a placeholder host mapped onto the proxy route), CSS
-// confined to `#dsh-root`, and a replay of the harness index boot steps inside
-// the POM document. The client can be booted once per page load, so leaving
+// confined to the harness containers, and a replay of the harness index boot
+// steps inside the POM document. Harness portals (dialogs, menus, notices)
+// that it appends to <body> are routed into `#dsh-portals`, so they get the
+// harness styles and never push the POM layout. The client can be booted once per page load, so leaving
 // the screen parks the live container and returning re-attaches the same one.
 
 import { scopeCss } from "./scopeCss.ts";
@@ -15,7 +17,8 @@ import { scopeCss } from "./scopeCss.ts";
 declare const __POM_PLUGIN_CODE__: string;
 
 export const ROOT_ID = "dsh-root";
-const SCOPE = `#${ROOT_ID}`;
+export const PORTALS_ID = "dsh-portals";
+const SCOPE = `:is(#${ROOT_ID}, #${PORTALS_ID})`;
 const HARNESS_STYLE = "style[data-plugin], style[data-dyn]";
 /** The origin the harness believes it runs on; never resolved on the network. */
 const HARNESS_ORIGIN = "http://dsh-harness.invalid";
@@ -29,6 +32,66 @@ type Page = Pick<Location, "origin" | "href" | "protocol" | "host">;
 let booted: Promise<void> | null = null;
 // Held here, not looked up: React detaches the screen before its cleanup runs.
 let root: HTMLElement | null = null;
+let portals: HTMLElement | null = null;
+/** Class names the harness stylesheets define; CSS Modules names always carry an underscore. */
+const harnessClasses = new Set<string>();
+
+function learnClasses(css: string): void {
+  for (const match of css.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) {
+    if (match[1].includes("_")) harnessClasses.add(match[1]);
+  }
+}
+
+/** A node the harness renders into <body>: its own or a nested element uses harness classes. */
+export function isHarnessNode(node: Node, classes: ReadonlySet<string> = harnessClasses): boolean {
+  if (!(node instanceof Element)) return false;
+  const owns = (element: Element) => Array.from(element.classList).some((name) => classes.has(name));
+  if (owns(node)) return true;
+  const nested = node.querySelectorAll("[class]");
+  for (let index = 0; index < nested.length && index < 50; index += 1) {
+    if (owns(nested[index])) return true;
+  }
+  return false;
+}
+
+/**
+ * React mounts harness portals into document.body and later removes them
+ * from it. Route those nodes into `#dsh-portals` and follow them there on
+ * removal; every other <body> child (the POM's own portals) is untouched.
+ */
+function routePortals(): void {
+  portals = document.createElement("div");
+  portals.id = PORTALS_ID;
+  // Out of the POM's flow and zero-sized: the harness root rules (height,
+  // background) also match this container, and portal content positions
+  // itself against the viewport anyway.
+  for (const [property, value] of [
+    ["position", "fixed"],
+    ["inset", "0 auto auto 0"],
+    ["width", "0"],
+    ["height", "0"],
+    ["overflow", "visible"],
+    ["background", "none"],
+    ["z-index", "1000"],
+  ]) {
+    portals.style.setProperty(property, value, "important");
+  }
+  const body = document.body;
+  const appendChild = body.appendChild.bind(body);
+  const insertBefore = body.insertBefore.bind(body);
+  const removeChild = body.removeChild.bind(body);
+  appendChild(portals);
+  body.appendChild = <T extends Node>(node: T): T =>
+    portals && node !== portals && isHarnessNode(node) ? portals.appendChild(node) : appendChild(node);
+  body.insertBefore = <T extends Node>(node: T, child: Node | null): T => {
+    if (portals && node !== portals && isHarnessNode(node)) {
+      return portals.insertBefore(node, child?.parentNode === portals ? child : null);
+    }
+    return insertBefore(node, child);
+  };
+  body.removeChild = <T extends Node>(child: T): T =>
+    portals && child.parentNode === portals ? portals.removeChild(child) : removeChild(child);
+}
 
 /**
  * Map a URL the harness built onto the POM proxy route. The harness derives
@@ -84,6 +147,7 @@ function installBridges(): void {
 function scopeStyle(node: Node): void {
   if (!(node instanceof HTMLStyleElement) || !node.matches(HARNESS_STYLE) || node.dataset.dshScoped) return;
   node.dataset.dshScoped = "true";
+  learnClasses(node.textContent ?? "");
   node.textContent = scopeCss(node.textContent ?? "", SCOPE, `${location.origin}${PROXY_PREFIX}/`);
 }
 
@@ -111,7 +175,9 @@ async function addStylesheet(url: string): Promise<void> {
   const style = document.createElement("style");
   style.dataset.dshScoped = "true";
   style.dataset.dshShell = "true";
-  style.textContent = scopeCss(await response.text(), SCOPE, new URL(url, location.href).href);
+  const css = await response.text();
+  learnClasses(css);
+  style.textContent = scopeCss(css, SCOPE, new URL(url, location.href).href);
   document.head.appendChild(style);
 }
 
@@ -134,6 +200,7 @@ function runScript(step: BootStep): Promise<void> {
 async function boot(): Promise<void> {
   installBridges();
   confineInjectedStyles();
+  routePortals();
   const response = await fetch(`${PROXY_PREFIX}/__pom/boot`);
   if (!response.ok) throw new Error(`harness boot plan: HTTP ${response.status}`);
   const plan = (await response.json()) as BootPlan;
@@ -148,6 +215,7 @@ export async function mountHarness(slot: HTMLElement): Promise<void> {
     root.id = ROOT_ID;
   }
   root.hidden = false;
+  if (portals) portals.hidden = false;
   slot.appendChild(root);
   booted ??= boot().catch((error: unknown) => {
     booted = null;
@@ -160,5 +228,6 @@ export async function mountHarness(slot: HTMLElement): Promise<void> {
 export function parkHarness(): void {
   if (!root) return;
   root.hidden = true;
+  if (portals) portals.hidden = true;
   document.body.appendChild(root);
 }

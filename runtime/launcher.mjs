@@ -21,7 +21,7 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { dirname, join } from "node:path";
@@ -39,6 +39,7 @@ const TOKEN_HEADER = "x-pom-plugin-token";
 const PREFIX_HEADER = "x-forwarded-prefix";
 const MOUNT_PREFIX = /^\/api\/ui\/plugins\/[a-z0-9][a-z0-9_.-]*\/proxy$/;
 const token = randomBytes(32).toString("base64url");
+const MODEL_POLL_MS = Number(env.DSH_POM_MODEL_POLL_MS || 15_000);
 
 let child;
 let reported = false;
@@ -80,34 +81,58 @@ async function listPomModels() {
 }
 
 /**
- * The node may still be binding its gateway when it configures the plugin,
- * and may serve no model yet: retry for a while before starting without the
- * POM route.
+ * The POM route in the harness's home-level patch layer (JSON is valid YAML).
+ * That layer belongs to the plugin (`DSH_HOME` is the plugin's) and the
+ * harness reloads it live, so the route follows the models the node serves.
+ * Providers the user adds on the harness Models page live in its settings
+ * document, which merges per provider over this layer; a model the user
+ * selects there also wins over this default.
  */
-async function pomModels(attempts = 20, delayMs = 3000) {
-  let last;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const models = await listPomModels();
-      if (models.length > 0) return models;
-      last = new Error(`${llmBaseUrl}/models listed no models`);
-    } catch (error) {
-      last = error;
-    }
-    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-  throw last;
+export function pomPatch(models, baseURL) {
+  if (models.length === 0) return [];
+  const provider = { displayName: "POM", api: "openai-completions", baseURL, apiKeyEnv: "DSH_POM_LLM_API_KEY", models };
+  return [
+    { id: "llm-pi-ai", config: { providers: { pom: provider } } },
+    { id: "agent-default-model", config: { provider: "pom", model: models[0].id } },
+  ];
 }
 
-/** Loader overlay (JSON is valid YAML) adapting the stock web profile to run under the POM. */
-function writeOverlay(models) {
-  const provider = {
-    displayName: "POM",
-    api: "openai-completions",
-    baseURL: llmBaseUrl,
-    apiKeyEnv: "DSH_POM_LLM_API_KEY",
-    models,
-  };
+/** Rewrite the home-level patch only when its content changes, so the harness reloads only then. */
+function writePomPatch(models) {
+  const path = join(dshHome, "cordis.patch.yml");
+  const text = `${JSON.stringify(pomPatch(models, llmBaseUrl), null, 2)}\n`;
+  let current;
+  try {
+    current = readFileSync(path, "utf8");
+  } catch {
+    current = undefined;
+  }
+  if (current === text) return false;
+  writeFileSync(path, text);
+  return true;
+}
+
+/** Follow the node's model list for as long as the harness runs. */
+function followPomModels(initial) {
+  let known = JSON.stringify(initial.map((model) => model.id));
+  const timer = setInterval(async () => {
+    let models;
+    try {
+      models = await listPomModels();
+    } catch (error) {
+      log(`POM models unavailable: ${error.message}`);
+      return;
+    }
+    const ids = JSON.stringify(models.map((model) => model.id));
+    if (ids === known) return;
+    known = ids;
+    if (writePomPatch(models)) log(`POM models changed: ${ids}`);
+  }, MODEL_POLL_MS);
+  timer.unref();
+}
+
+/** Static loader overlay (JSON is valid YAML) adapting the stock web profile to run under the POM. */
+function writeOverlay() {
   // The browser usually runs on another machine than the POM node, so the
   // workspace picker must be the in-page one, never the node's native dialog.
   const overlay = [
@@ -119,11 +144,6 @@ function writeOverlay(models) {
       ],
     },
   ];
-  if (models.length > 0) {
-    overlay.push({ id: "llm-pi-ai", config: { providers: { pom: provider } } });
-    // Fresh agents start on a POM model; a selection saved in the harness settings still wins.
-    overlay.push({ id: "agent-default-model", config: { provider: "pom", model: models[0].id } });
-  }
   const path = join(dataDir, "pom-overlay.yml");
   writeFileSync(path, `${JSON.stringify(overlay, null, 2)}\n`);
   return path;
@@ -377,19 +397,21 @@ async function main() {
   let models = [];
   let warning;
   try {
-    models = await pomModels();
-    if (models.length === 0) warning = `${llmBaseUrl}/models listed no models`;
+    models = await listPomModels();
+    if (models.length === 0) warning = `${llmBaseUrl}/models listed no models yet`;
   } catch (error) {
     warning = `POM models unavailable: ${error.message}`;
   }
   if (warning) log(warning);
-  const harness = await startHarness(writeOverlay(models));
+  writePomPatch(models);
+  const harness = await startHarness(writeOverlay());
   const cookie = await harnessSession(harness.port, harness.token);
   await registerWorkspace(harness.port, cookie).catch((error) => {
     warning = [warning, error.message].filter(Boolean).join("; ");
     log(error.message);
   });
   const port = await startProxy(harness.port, cookie);
+  followPomModels(models);
   log(`proxy on 127.0.0.1:${port} -> harness 127.0.0.1:${harness.port}; ${models.length} POM model(s)`);
   report({ status: "ready", port, token, models: models.map((model) => model.id), warning });
 }

@@ -29,8 +29,8 @@ POM admin UI (/admin-ui/deepseek_harness/harness)
   - `host.configure`: the POM hands over `gateway.openai_base_url` and `gateway.api_key`. The library then unpacks the runtime once per checksum under the plugin data directory and starts the launcher with those values. A new configuration restarts it.
   - `ui.upstream`: tells the POM proxy the launcher's loopback port and per-launch token.
   - `ui/runtime.json`: the status the screen polls. It carries neither the port nor the token.
-- `runtime/launcher.mjs` starts `dsh web` on loopback with a loader overlay. The overlay registers the POM models (from `GET /v1/models`, retried while the node starts), makes the first one the default, and selects the in-page workspace picker. The launcher also registers the plugin working directory as a workspace. It serves only requests that carry the POM's token.
-- `ui/` holds the plugin screen and the CSS scoper.
+- `runtime/launcher.mjs` starts `dsh web` on loopback right away, whether or not the node serves a model yet. It keeps the POM route in the harness's home-level patch layer (`$DSH_HOME/cordis.patch.yml`, owned by the plugin and reloaded live by the harness) and polls `GET /v1/models` every 15 s. When the list changes, the route's models and the default agent model follow it, with no restart. Providers the user adds on the harness Models page live in its settings document, which merges per provider over this layer. The launcher also selects the in-page workspace picker, registers the plugin working directory as a workspace, and serves only requests that carry the POM's token.
+- `ui/` holds the plugin screen and the CSS scoper. The screen mounts the harness in `#dsh-root` and routes the harness portals (dialogs, menus, notices) into `#dsh-portals`, a zero-size fixed container. Both share the scoped styles and never push the POM layout.
 - `scripts/fetch-runtime.sh` installs a portable Node.js plus `@deepseek-ai/dsh@<tag>` from npm, packed as the archive the library embeds.
 
 The model endpoint and key never come from the build or from environment variables: the POM provides them. It requires a POM with the plugin proxy and `host.configure` (branch `feat/plugin-ui-proxy` of the `pom` repository).
@@ -67,8 +67,7 @@ The node side of the contract is tested in the `pom` repository (`plugin_proxy` 
 
 ## Known limitations
 
-- **Portals and modals are not adapted yet.** Harness dialogs, menus and notices render as children of `<body>`, outside `#dsh-root`, so they appear unstyled at the bottom of the page. Examples: the first-run notice, the workspace picker, the model menu and Settings.
 - **Bundle rewriting depends on current harness internals.** The rewrites cover `location.origin`, `#root` and the HMR event source. The harness is a developer preview, so a new release can require adjusting them.
-- **The POM model list is read when the harness starts.** Models deployed later appear after the plugin restarts.
+- **Portals are recognized by their class names.** A harness node appended to `<body>` goes to `#dsh-portals` when it uses a class from the harness's CSS Modules stylesheets. A portal without such a class would render outside the scoped styles.
 - **The harness runs as the POM user.** It uses that user's home directory, including any agent skills found there, and the POM API key it receives is the node's chat key.
 - **The harness theme follows its own setting**, not the POM theme.

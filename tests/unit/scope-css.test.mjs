@@ -35,3 +35,10 @@ test("relative urls resolve against the harness origin", () => {
   assert.equal(rebaseUrls('url("/favicon.svg")', base), 'url("http://node:4100/favicon.svg")');
   assert.equal(rebaseUrls("url(data:image/png;base64,AA)", base), "url(data:image/png;base64,AA)");
 });
+
+test("one scope covers the harness root and its portal container", () => {
+  const both = ":is(#dsh-root, #dsh-portals)";
+  assert.equal(scopeSelector(":root", both), both);
+  assert.equal(scopeSelector("._list_1nxmc_8 ._item_1nxmc_92", both), `${both} ._list_1nxmc_8 ._item_1nxmc_92`);
+  assert.equal(scopeSelector("body[data-ds-dark-theme] .card", both), `body[data-ds-dark-theme] ${both} .card`);
+});

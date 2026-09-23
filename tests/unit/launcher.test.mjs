@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bootPlan, forwardedPath, mountPrefix, rewriteScript } from "../../runtime/launcher.mjs";
+import { bootPlan, forwardedPath, mountPrefix, pomPatch, rewriteScript } from "../../runtime/launcher.mjs";
 
 test("the forwarded target keeps every byte of the query", () => {
   assert.equal(forwardedPath("/plugins/??@a/b.js,@c/d.js&rev=1"), "/plugins/??@a/b.js,@c/d.js&rev=1");
@@ -48,4 +48,24 @@ test("harness bundles resolve their origin and mount point through the plugin", 
   assert.match(rewritten, /const location = globalThis\.__DSH_POM__ \?\? globalThis\.location;/);
   assert.match(rewritten, /\(globalThis\.__DSH_POM__\?\.origin \?\? window\.location\.origin\)/);
   assert.match(rewritten, /new EventSource\(new URL\(EVENTS_ENDPOINT, globalThis\.__DSH_POM__ \?\? location\.href\)\)/);
+});
+
+test("the POM route and default model follow the node's model list", () => {
+  assert.deepEqual(pomPatch([], "http://127.0.0.1:8080/v1"), []);
+  const patch = pomPatch([{ id: "a", name: "a" }, { id: "b", name: "b" }], "http://127.0.0.1:8080/v1");
+  assert.deepEqual(patch[0], {
+    id: "llm-pi-ai",
+    config: {
+      providers: {
+        pom: {
+          displayName: "POM",
+          api: "openai-completions",
+          baseURL: "http://127.0.0.1:8080/v1",
+          apiKeyEnv: "DSH_POM_LLM_API_KEY",
+          models: [{ id: "a", name: "a" }, { id: "b", name: "b" }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(patch[1], { id: "agent-default-model", config: { provider: "pom", model: "a" } });
 });
