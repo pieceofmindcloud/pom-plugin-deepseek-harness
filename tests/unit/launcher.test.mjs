@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bootPlan, forwardedPath, mountPrefix, pomPatch, rewriteScript } from "../../runtime/launcher.mjs";
+import { bootPlan, defaultModelChange, forwardedPath, mountPrefix, pomPatch, rewriteScript } from "../../runtime/launcher.mjs";
 
 test("the forwarded target keeps every byte of the query", () => {
   assert.equal(forwardedPath("/plugins/??@a/b.js,@c/d.js&rev=1"), "/plugins/??@a/b.js,@c/d.js&rev=1");
@@ -41,6 +41,7 @@ test("harness bundles resolve their origin and mount point through the plugin", 
     "const location = globalThis.location;",
     "const here = window.location.origin;",
     "const source = new EventSource(EVENTS_ENDPOINT);",
+    "isLoopback: isLoopbackHostname(pageLocation.hostname),",
   ].join("\n");
   const rewritten = rewriteScript(source);
   assert.match(rewritten, /getElementById\("dsh-root"\)/);
@@ -48,11 +49,13 @@ test("harness bundles resolve their origin and mount point through the plugin", 
   assert.match(rewritten, /const location = globalThis\.__DSH_POM__ \?\? globalThis\.location;/);
   assert.match(rewritten, /\(globalThis\.__DSH_POM__\?\.origin \?\? window\.location\.origin\)/);
   assert.match(rewritten, /new EventSource\(new URL\(EVENTS_ENDPOINT, globalThis\.__DSH_POM__ \?\? location\.href\)\)/);
+  assert.match(rewritten, /isLoopback: \(globalThis\.__DSH_POM__ !== void 0 \|\| isLoopbackHostname\(pageLocation\.hostname\)\),/);
 });
 
-test("the POM route and default model follow the node's model list", () => {
+test("the live patch carries only the POM route", () => {
   assert.deepEqual(pomPatch([], "http://127.0.0.1:8080/v1"), []);
   const patch = pomPatch([{ id: "a", name: "a" }, { id: "b", name: "b" }], "http://127.0.0.1:8080/v1");
+  assert.equal(patch.length, 1, "reloading agent-default-model takes the session controller down");
   assert.deepEqual(patch[0], {
     id: "llm-pi-ai",
     config: {
@@ -67,5 +70,18 @@ test("the POM route and default model follow the node's model list", () => {
       },
     },
   });
-  assert.deepEqual(patch[1], { id: "agent-default-model", config: { provider: "pom", model: "a" } });
+});
+
+test("the default model moves to POM without overriding a real choice", () => {
+  const base = { provider: "deepseek-official", model: "deepseek-flash" };
+  const models = [{ id: "a" }, { id: "b" }];
+  assert.deepEqual(defaultModelChange(base, base, models), { provider: "pom", model: "a" });
+  assert.equal(defaultModelChange(base, base, []), undefined, "no POM model to point at");
+  assert.equal(defaultModelChange({ provider: "pom", model: "b" }, base, models), undefined, "still served");
+  assert.deepEqual(defaultModelChange({ provider: "pom", model: "gone" }, base, models), { provider: "pom", model: "a" });
+  assert.equal(
+    defaultModelChange({ provider: "anthropic", model: "claude" }, base, models),
+    undefined,
+    "the user picked another provider",
+  );
 });

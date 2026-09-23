@@ -85,16 +85,30 @@ async function listPomModels() {
  * That layer belongs to the plugin (`DSH_HOME` is the plugin's) and the
  * harness reloads it live, so the route follows the models the node serves.
  * Providers the user adds on the harness Models page live in its settings
- * document, which merges per provider over this layer; a model the user
- * selects there also wins over this default.
+ * document, which merges per provider over this layer.
+ *
+ * Only the route lives here. Reloading the `agent-default-model` entry takes
+ * the harness session controller down for good, so the default model is a
+ * settings value instead (see `ensureDefaultModel`).
  */
 export function pomPatch(models, baseURL) {
   if (models.length === 0) return [];
   const provider = { displayName: "POM", api: "openai-completions", baseURL, apiKeyEnv: "DSH_POM_LLM_API_KEY", models };
-  return [
-    { id: "llm-pi-ai", config: { providers: { pom: provider } } },
-    { id: "agent-default-model", config: { provider: "pom", model: models[0].id } },
-  ];
+  return [{ id: "llm-pi-ai", config: { providers: { pom: provider } } }];
+}
+
+/**
+ * The default model to store, or undefined to leave the user's choice alone:
+ * set it when the selection is still the composition default, or when it
+ * points at a POM model the node no longer serves.
+ */
+export function defaultModelChange(current, base, models) {
+  if (models.length === 0) return undefined;
+  const served = new Set(models.map((model) => model.id));
+  const untouched = current?.provider === base?.provider && current?.model === base?.model;
+  const stale = current?.provider === "pom" && !served.has(current?.model);
+  if ((untouched && current?.provider !== "pom") || stale) return { provider: "pom", model: models[0].id };
+  return undefined;
 }
 
 /** Rewrite the home-level patch only when its content changes, so the harness reloads only then. */
@@ -113,7 +127,7 @@ function writePomPatch(models) {
 }
 
 /** Follow the node's model list for as long as the harness runs. */
-function followPomModels(initial) {
+function followPomModels(initial, session) {
   let known = JSON.stringify(initial.map((model) => model.id));
   const timer = setInterval(async () => {
     let models;
@@ -127,6 +141,7 @@ function followPomModels(initial) {
     if (ids === known) return;
     known = ids;
     if (writePomPatch(models)) log(`POM models changed: ${ids}`);
+    await ensureDefaultModel(session, models).catch((error) => log(`default model not updated: ${error.message}`));
   }, MODEL_POLL_MS);
   timer.unref();
 }
@@ -198,25 +213,41 @@ function harnessSession(port, token) {
   });
 }
 
+/** One unary call to the harness's Remote API, with the server-side session. */
+async function harnessCall({ port, cookie }, endpoint, args) {
+  const response = await fetch(`http://127.0.0.1:${port}/api/${endpoint}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie, origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ type: "client-request", rpcId: randomUUID(), method: endpoint, payload: { args } }),
+  });
+  const reply = await response.json().catch(() => undefined);
+  if (reply?.result?.ok !== true) {
+    throw new Error(`${endpoint} failed: ${JSON.stringify(reply?.result?.error ?? response.status)}`);
+  }
+  return reply.result.value;
+}
+
 /**
  * Register the plugin's working directory as a Workspace through the
  * harness's own Remote API (idempotent), so a session can start right away.
  */
-async function registerWorkspace(port, cookie) {
-  const response = await fetch(`http://127.0.0.1:${port}/api/workspace/create`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: `http://127.0.0.1:${port}` },
-    body: JSON.stringify({
-      type: "client-request",
-      rpcId: randomUUID(),
-      method: "workspace/create",
-      payload: { args: { request: { path: workspace } } },
-    }),
+function registerWorkspace(session) {
+  return harnessCall(session, "workspace/create", { request: { path: workspace } });
+}
+
+/** Point new agents at a POM model through the settings the model picker also writes. */
+async function ensureDefaultModel(session, models) {
+  const described = await harnessCall(session, "settings/describe", {});
+  const namespace = described.namespaces.find((entry) => entry.ns === "agent-default-model");
+  if (!namespace) return;
+  const change = defaultModelChange(namespace.value, namespace.base, models);
+  if (!change) return;
+  await harnessCall(session, "settings/update", {
+    ns: "agent-default-model",
+    patch: change,
+    expectedRevision: namespace.revision,
   });
-  const reply = await response.json().catch(() => undefined);
-  if (reply?.result?.ok !== true) {
-    throw new Error(`workspace registration failed: ${JSON.stringify(reply?.result?.error ?? response.status)}`);
-  }
+  log(`default model set to pom/${change.model}`);
 }
 
 // --- Proxy --------------------------------------------------------------------
@@ -243,9 +274,18 @@ export function mountPrefix(value) {
   return typeof value === "string" && MOUNT_PREFIX.test(value) ? value : "";
 }
 
-/** Redirect every browser base the harness derives from `location` to `__DSH_POM__`. */
+/**
+ * Redirect every browser base the harness derives from `location` to
+ * `__DSH_POM__`. The harness also keeps its settings browser-local unless the
+ * page is on a loopback host; under the POM the only client of the harness is
+ * the node's admin-only proxy on loopback, so a POM-mounted page counts as one.
+ */
 export function rewriteScript(source) {
   return source
+    .replaceAll(
+      "isLoopbackHostname(pageLocation.hostname)",
+      "(globalThis.__DSH_POM__ !== void 0 || isLoopbackHostname(pageLocation.hostname))",
+    )
     .replaceAll('getElementById("root")', 'getElementById("dsh-root")')
     .replaceAll("globalThis.location?.origin", "(globalThis.__DSH_POM__?.origin ?? globalThis.location?.origin)")
     .replaceAll("window.location.origin", "(globalThis.__DSH_POM__?.origin ?? window.location.origin)")
@@ -406,12 +446,15 @@ async function main() {
   writePomPatch(models);
   const harness = await startHarness(writeOverlay());
   const cookie = await harnessSession(harness.port, harness.token);
-  await registerWorkspace(harness.port, cookie).catch((error) => {
-    warning = [warning, error.message].filter(Boolean).join("; ");
-    log(error.message);
-  });
+  const session = { port: harness.port, cookie };
+  for (const step of [() => registerWorkspace(session), () => ensureDefaultModel(session, models)]) {
+    await step().catch((error) => {
+      warning = [warning, error.message].filter(Boolean).join("; ");
+      log(error.message);
+    });
+  }
   const port = await startProxy(harness.port, cookie);
-  followPomModels(models);
+  followPomModels(models, session);
   log(`proxy on 127.0.0.1:${port} -> harness 127.0.0.1:${harness.port}; ${models.length} POM model(s)`);
   report({ status: "ready", port, token, models: models.map((model) => model.id), warning });
 }
