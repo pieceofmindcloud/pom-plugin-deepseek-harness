@@ -98,7 +98,8 @@ printf '{\n  "dsh_version": "%s",\n  "node_version": "%s",\n  "platform": "%s"\n
   "$resolved" "$node_version" "$platform" > "$stage/runtime.json"
 
 archive="${output}/runtime-${platform}.tar.gz"
-tar -czf "$archive" -C "$stage" .
+# macOS tar would add an AppleDouble `._*` entry for every file with extended attributes.
+COPYFILE_DISABLE=1 tar -czf "$archive" -C "$stage" .
 size="$(wc -c < "$archive" | tr -d '[:space:]')"
 if command -v shasum >/dev/null 2>&1; then
   sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
