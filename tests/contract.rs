@@ -26,8 +26,9 @@ fn manifest_registers_one_admin_only_full_bleed_screen() {
     assert_eq!(menu[0]["to"], "/harness");
     assert_eq!(menu[0]["label"]["en"], "Deepseek Harness");
     assert_eq!(menu[0]["roles"], serde_json::json!(["admin"]));
-    // One of the names the POM resolves; anything else falls back to a generic icon.
+    // icon_image is optional in the POM; the named icon is the fallback.
     assert_eq!(menu[0]["icon"], "terminal");
+    assert_eq!(menu[0]["icon_image"], "ui/icon.png");
 
     let routes = manifest["routes"].as_array().expect("routes array");
     assert_eq!(routes.len(), 1);
@@ -60,10 +61,12 @@ fn assets_include_the_dynamic_runtime_status() {
             "ui/runtime.json",
             "i18n/en.json",
             "i18n/pt-BR.json",
+            "ui/icon.png",
         ])
     );
     assert!(text("ui/src/screens/Harness.tsx").contains("\"ui/runtime.json\""));
     assert!(text("src/lib.rs").contains("const RUNTIME_ASSET: &str = \"ui/runtime.json\";"));
+    assert!(text("build.rs").contains("Some(\"png\") => \"image/png\""));
 }
 
 #[test]

@@ -30,7 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const env = process.env;
 const dataDir = env.DSH_POM_DATA_DIR || join(here, "data");
-const dshHome = join(dataDir, "dsh-home");
+const dshHome = env.DSH_POM_HOME_DIR || join(dataDir, "dsh-home");
 const workspace = env.DSH_POM_WORKSPACE || join(dataDir, "workspace");
 const llmBaseUrl = (env.DSH_POM_LLM_BASE_URL || "").replace(/\/+$/, "");
 const llmApiKey = env.DSH_POM_LLM_API_KEY || "";

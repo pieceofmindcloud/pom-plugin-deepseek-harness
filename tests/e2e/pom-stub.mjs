@@ -41,7 +41,7 @@ const NODE_INFO = {
     ram: { total: 0, used: 0, available: 0 }, gpu_kind: "none", gpu_note: null,
   },
 };
-const ALLOWED_TYPES = new Set(["text/javascript", "text/css", "image/svg+xml", "application/json"]);
+const ALLOWED_TYPES = new Set(["text/javascript", "text/css", "image/svg+xml", "image/png", "application/json"]);
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json",
   ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2", ".webmanifest": "application/manifest+json",
@@ -100,7 +100,11 @@ if (manifest.schema !== "pom-plugin-ui/v1" || manifest.plugin_code !== pluginCod
 }
 console.error(`pom-stub: plugin ${pluginCode} ${ready.plugin_version} ready`);
 // Like the node: hand the plugin its model endpoint and key once it runs.
-await ipc("query", { operation: "host.configure", gateway: { openai_base_url: llmBaseUrl, api_key: apiKey } });
+await ipc("query", {
+  operation: "host.configure",
+  gateway: { openai_base_url: llmBaseUrl, api_key: apiKey },
+  workspace_root: join(dataDir, "workspace"),
+});
 
 // --- HTTP -------------------------------------------------------------------
 

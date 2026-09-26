@@ -30,6 +30,7 @@ const PLUGIN_DIR: &str = "deepseek_harness";
 pub struct Gateway {
     pub openai_base_url: String,
     pub api_key: String,
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl Gateway {
@@ -44,9 +45,14 @@ impl Gateway {
             .as_str()
             .filter(|key| !key.trim().is_empty())
             .ok_or("host.configure has no gateway.api_key")?;
+        let workspace_root = request["workspace_root"]
+            .as_str()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from);
         Ok(Self {
             openai_base_url: openai_base_url.to_owned(),
             api_key: api_key.to_owned(),
+            workspace_root,
         })
     }
 }
@@ -168,10 +174,16 @@ impl Supervisor {
         let node = runtime
             .join("bin")
             .join(if cfg!(windows) { "node.exe" } else { "node" });
+        let workspace = gateway
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| base.join("data").join("workspace"));
         let mut child = Command::new(&node)
             .arg(runtime.join("launcher.mjs"))
             .current_dir(&runtime)
             .env("DSH_POM_DATA_DIR", base.join("data"))
+            .env("DSH_POM_HOME_DIR", base.join("data").join("dsh-home"))
+            .env("DSH_POM_WORKSPACE", workspace)
             .env("DSH_POM_LLM_BASE_URL", &gateway.openai_base_url)
             .env("DSH_POM_LLM_API_KEY", &gateway.api_key)
             .stdin(Stdio::piped())
@@ -332,9 +344,13 @@ mod tests {
 
     #[test]
     fn runtime_unpacks_once_per_checksum_and_replaces_older_ones() {
-        let root = std::env::temp_dir().join(format!("dsh-unpack-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let test_root = std::env::temp_dir().join(format!("dsh-unpack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&test_root);
+        let root = test_root.join("runtime");
         let first = archive_with(&[("launcher.mjs", b"// one")]);
+        let persistent_runtime = test_root.join("data/dsh-home/runtime");
+        fs::create_dir_all(&persistent_runtime).unwrap();
+        fs::write(persistent_runtime.join("user-data.json"), b"keep me").unwrap();
         let path = unpack_runtime(&root, &first, &"a".repeat(64)).unwrap();
         assert_eq!(fs::read(path.join("launcher.mjs")).unwrap(), b"// one");
         assert_eq!(unpack_runtime(&root, &[], &"a".repeat(64)).unwrap(), path);
@@ -343,7 +359,11 @@ mod tests {
         let next = unpack_runtime(&root, &second, &"b".repeat(64)).unwrap();
         assert_eq!(fs::read(next.join("launcher.mjs")).unwrap(), b"// two");
         assert!(!path.exists());
-        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            fs::read(persistent_runtime.join("user-data.json")).unwrap(),
+            b"keep me"
+        );
+        fs::remove_dir_all(&test_root).unwrap();
     }
 
     #[test]
@@ -381,7 +401,8 @@ mod tests {
             Gateway::from_configure(&request),
             Ok(Gateway {
                 openai_base_url: "http://127.0.0.1:8080/v1".into(),
-                api_key: "sk-1".into()
+                api_key: "sk-1".into(),
+                workspace_root: None
             })
         );
         assert!(Gateway::from_configure(&json!({})).is_err());
@@ -393,5 +414,14 @@ mod tests {
             &json!({"gateway": {"openai_base_url": "http://x/v1", "api_key": " "}})
         )
         .is_err());
+        let with_workspace = Gateway::from_configure(&json!({
+            "gateway": {"openai_base_url": "http://x/v1", "api_key": "sk-1"},
+            "workspace_root": "/srv/pom/workspace"
+        }))
+        .unwrap();
+        assert_eq!(
+            with_workspace.workspace_root,
+            Some(PathBuf::from("/srv/pom/workspace"))
+        );
     }
 }
