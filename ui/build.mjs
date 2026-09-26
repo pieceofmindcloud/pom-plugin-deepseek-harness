@@ -1,6 +1,6 @@
 import { build } from "esbuild";
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -71,6 +71,8 @@ await build({
 });
 const screensPath = "dist/screens.js";
 writeFileSync(screensPath, namespacePluginCode(readFileSync(screensPath, "utf8")));
+
+copyFileSync("public/icon.png", "dist/icon.png");
 
 const css = namespacePluginCode(readFileSync("src/plugin.css", "utf8"));
 writeFileSync("dist/plugin.css", css);

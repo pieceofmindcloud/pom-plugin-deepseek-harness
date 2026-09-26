@@ -8,6 +8,7 @@ fn content_type(name: &str) -> &'static str {
         Some("js") => "text/javascript",
         Some("css") => "text/css",
         Some("json") => "application/json",
+        Some("png") => "image/png",
         _ => "application/octet-stream",
     }
 }
@@ -48,7 +49,7 @@ fn main() {
     let mut entries = Vec::new();
 
     for (directory, prefix, extensions) in [
-        ("ui/dist", "ui", &["js", "css"][..]),
+        ("ui/dist", "ui", &["js", "css", "png"][..]),
         ("ui/dist/i18n", "i18n", &["json"][..]),
     ] {
         println!("cargo:rerun-if-changed={directory}");
