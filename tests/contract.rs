@@ -28,7 +28,9 @@ fn manifest_registers_one_admin_only_full_bleed_screen() {
     assert_eq!(menu[0]["roles"], serde_json::json!(["admin"]));
     // icon_image is optional in the POM; the named icon is the fallback.
     assert_eq!(menu[0]["icon"], "terminal");
-    assert_eq!(menu[0]["icon_image"], "ui/icon.png");
+    // The POM reads the plugin-owned PNG from the manifest root, not from a menu item.
+    assert_eq!(manifest["icon_image"], "ui/icon.png");
+    assert!(menu[0].get("icon_image").is_none());
 
     let routes = manifest["routes"].as_array().expect("routes array");
     assert_eq!(routes.len(), 1);

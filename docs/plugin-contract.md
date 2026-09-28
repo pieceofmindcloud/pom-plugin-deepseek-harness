@@ -6,7 +6,8 @@ This plugin implements `pom-plugin-ui/v1` and the generic plugin ABI. The author
 
 - The host calls `host.configure` with `gateway.openai_base_url` and `gateway.api_key`. It may also provide the common `workspace_root` path. When omitted, the plugin uses its managed workspace directory.
 - `ui.upstream` returns only the loopback port and per-launch proxy token once ready. `ui/runtime.json` exposes status without that token.
-- Runtime assets are returned through `ui.asset`; the PNG icon is optional and the menu's `terminal` icon is the fallback for hosts that do not render `icon_image`.
+- Runtime assets are returned through `ui.asset`; the PNG icon (`ui/icon.png`, declared as the manifest-level `icon_image`) is optional and the menu's `terminal` icon is the fallback for hosts that do not render it.
+- The screen follows the POM's `pom-plugin-events/v1` `theme.changed` and `locale.changed` events on the `pom:plugin-event` DOM channel (`ui/src/harness/pomContext.ts`).
 - The POM node must provide its admin-only plugin proxy and strip POM credentials before proxying to the plugin.
 
 ## Persistent data and upgrades

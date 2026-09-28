@@ -9,9 +9,11 @@
 // confined to the harness containers, and a replay of the harness index boot
 // steps inside the POM document. Harness portals (dialogs, menus, notices)
 // that it appends to <body> are routed into `#dsh-portals`, so they get the
-// harness styles and never push the POM layout. The client can be booted once per page load, so leaving
+// harness styles and never push the POM layout. Its light/dark theme and
+// language follow the POM (`pomContext.ts`). The client can be booted once per page load, so leaving
 // the screen parks the live container and returning re-attaches the same one.
 
+import { installPomContext, restorePomLanguage } from "./pomContext.ts";
 import { scopeCss } from "./scopeCss.ts";
 
 declare const __POM_PLUGIN_CODE__: string;
@@ -198,6 +200,8 @@ function runScript(step: BootStep): Promise<void> {
 }
 
 async function boot(): Promise<void> {
+  // Before any client script runs: its theme and locale read these at startup.
+  installPomContext(__POM_PLUGIN_CODE__);
   installBridges();
   confineInjectedStyles();
   routePortals();
@@ -206,6 +210,7 @@ async function boot(): Promise<void> {
   const plan = (await response.json()) as BootPlan;
   await Promise.all(plan.styles.map(addStylesheet));
   for (const step of plan.steps) await runScript(step);
+  restorePomLanguage();
 }
 
 /** Attach the harness to `slot`, booting it on first use. */
