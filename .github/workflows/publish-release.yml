@@ -64,8 +64,11 @@ jobs:
     name: Build ${{ matrix.name }} ${{ matrix.version }}
     needs: plan
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
@@ -94,15 +97,22 @@ jobs:
           node --experimental-strip-types --test tests/unit/*.test.mjs
         env:
           POM_UI_REQUIRE_DIST: '1'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: plugin-${{ matrix.name }}
-          path: |
-            dist-release/pom-plugin-deepseek-harness-${{ matrix.platform }}.${{ matrix.ext }}
-            dist-release/pom-plugin-deepseek-harness-${{ matrix.platform }}.metadata.json
-          if-no-files-found: error
-          # Os pacotes só passam entre as etapas; a release guarda os definitivos.
-          retention-days: 1
+      - name: Stage assets on a draft release (bypasses Actions artifact storage)
+        shell: bash
+        run: |
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$PRERELEASE" == true ]]; then
+              gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --title "$RELEASE_TAG" --notes "Release $RELEASE_TAG"
+            else
+              gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "$RELEASE_TAG" --notes "Release $RELEASE_TAG"
+            fi
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber dist-release/pom-plugin-deepseek-harness-${PLATFORM}.*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ matrix.version }}
+          PLATFORM: ${{ matrix.platform }}
+          PRERELEASE: ${{ inputs.prerelease }}
 
   release:
     name: Release ${{ matrix.name }} ${{ matrix.version }}
@@ -115,16 +125,17 @@ jobs:
       max-parallel: 1
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: plugin-${{ matrix.name }}
-          path: packages
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ matrix.version }}
-          name: ${{ matrix.version }}
-          prerelease: ${{ inputs.prerelease }}
-          files: packages/*
+      - name: Publish the assembled release
+        shell: bash
+        run: |
+          release_id="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            --field draft=false \
+            --field prerelease="$PRERELEASE"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ matrix.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
 
   license-server:
     name: License server ${{ matrix.name }} ${{ matrix.version }}
