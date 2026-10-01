@@ -2,8 +2,10 @@
 //
 // The plugin library starts this script with the Node runtime shipped next to
 // it, passing the model endpoint and API key the POM handed over
-// (`DSH_POM_LLM_BASE_URL`, `DSH_POM_LLM_API_KEY`). It boots the unmodified
-// `dsh web` server on a private loopback port, points its pi-ai provider at
+// (`DSH_POM_LLM_BASE_URL`, `DSH_POM_LLM_API_KEY`). It first makes sure the
+// official `@deepseek-ai/dsh` release is installed in the plugin data
+// directory, on the newest version of the tracked npm dist-tag
+// (`dsh-install.mjs`), then boots the unmodified `dsh web` server on a private loopback port, points its pi-ai provider at
 // the POM, and fronts it with a loopback proxy that only the POM node reaches:
 // the node mounts it at `/api/ui/plugins/<code>/proxy` (admin-only) and adds
 // the per-launch token in `x-pom-plugin-token`. The proxy adapts the harness
@@ -22,6 +24,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { ensureDsh } from "./dsh-install.mjs";
 import http from "node:http";
 import net from "node:net";
 import { dirname, join } from "node:path";
@@ -34,7 +37,14 @@ const dshHome = env.DSH_POM_HOME_DIR || join(dataDir, "dsh-home");
 const workspace = env.DSH_POM_WORKSPACE || join(dataDir, "workspace");
 const llmBaseUrl = (env.DSH_POM_LLM_BASE_URL || "").replace(/\/+$/, "");
 const llmApiKey = env.DSH_POM_LLM_API_KEY || "";
-const dshBin = join(here, "app", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+/** Build-time runtime facts: the dsh npm dist-tag to track and the node-pty platform. */
+function runtimeInfo() {
+  try {
+    return JSON.parse(readFileSync(join(here, "runtime.json"), "utf8"));
+  } catch {
+    return {};
+  }
+}
 const TOKEN_HEADER = "x-pom-plugin-token";
 const PREFIX_HEADER = "x-forwarded-prefix";
 const MOUNT_PREFIX = /^\/api\/ui\/plugins\/[a-z0-9][a-z0-9_.-]*\/proxy$/;
@@ -184,7 +194,7 @@ function writeOverlay() {
 
 // --- Harness process --------------------------------------------------------
 
-function startHarness(overlay) {
+function startHarness(overlay, dshBin) {
   return new Promise((resolve, reject) => {
     child = spawn(
       process.execPath,
@@ -308,7 +318,11 @@ export function rewriteScript(source) {
     .replaceAll("globalThis.location?.origin", "(globalThis.__DSH_POM__?.origin ?? globalThis.location?.origin)")
     .replaceAll("window.location.origin", "(globalThis.__DSH_POM__?.origin ?? window.location.origin)")
     .replace(/const location = globalThis\.location;/g, "const location = globalThis.__DSH_POM__ ?? globalThis.location;")
-    .replaceAll("new EventSource(EVENTS_ENDPOINT)", "new EventSource(new URL(EVENTS_ENDPOINT, globalThis.__DSH_POM__ ?? location.href))");
+    .replaceAll("new EventSource(EVENTS_ENDPOINT)", "new EventSource(new URL(EVENTS_ENDPOINT, globalThis.__DSH_POM__ ?? location.href))")
+    // dsh 0.1.7 resolves its stream socket (`api/remote.mux`), uploads and media
+    // URLs against `document.baseURI`, which inside the POM is the POM page; the
+    // plugin screen sets `__DSH_POM_BASE__` to the proxy route instead.
+    .replaceAll("document.baseURI", "(globalThis.__DSH_POM_BASE__ ?? document.baseURI)");
 }
 
 function upstreamHeaders(request, upstream, cookie) {
@@ -338,6 +352,9 @@ export function bootPlan(html, prefix) {
     // Root-relative harness paths keep their shape under the prefix; the URL
     // parser would drop the prefix and re-encode the `/plugins/??` query.
     if (decoded.startsWith("/")) return `${prefix}${decoded}`;
+    // Since @deepseek-ai/dsh 0.1.7 the combo URLs are document-relative
+    // (`plugins/??@a/client.js&rev=1`); same treatment, same reason.
+    if (decoded.startsWith("plugins/")) return `${prefix}/${decoded}`;
     const url = new URL(decoded, `http://mount.invalid${prefix}/`);
     return `${url.pathname}${url.search}`;
   };
@@ -354,7 +371,9 @@ export function bootPlan(html, prefix) {
     if (src) {
       steps.push({ kind: /\btype="module"/.test(attributes) ? "module" : "script", url: absolute(src) });
     } else if (match[2].trim()) {
-      const code = rewriteScript(match[2]).replace(/"url":"\//g, `"url":"${prefix}/`);
+      // Boot entries name root-relative (`/plugins/...`, before 0.1.7) or
+      // document-relative (`plugins/...`) URLs; both go under the prefix.
+      const code = rewriteScript(match[2]).replace(/"url":"(?:\/|(?=plugins\/))/g, `"url":"${prefix}/`);
       steps.push({ kind: "inline", code });
     }
   }
@@ -461,8 +480,19 @@ async function main() {
     warning = `POM models unavailable: ${error.message}`;
   }
   if (warning) log(warning);
+  const info = runtimeInfo();
+  const dsh = await ensureDsh({
+    root: join(dataDir, "dsh"),
+    track: env.DSH_POM_DSH_TRACK || info.dsh_track || "latest",
+    keepPty: info.node_pty_platform,
+    nodeBin: process.execPath,
+    npmCli: join(here, "npm", "bin", "npm-cli.js"),
+    cacheDir: join(dataDir, "cache", "npm"),
+    log,
+  });
+  log(`using @deepseek-ai/dsh@${dsh.version}`);
   writePomPatch(models);
-  const harness = await startHarness(writeOverlay());
+  const harness = await startHarness(writeOverlay(), dsh.bin);
   const cookie = await harnessSession(harness.port, harness.token);
   const session = { port: harness.port, cookie };
   for (const step of [() => registerWorkspace(session), () => ensureDefaultModel(session, models)]) {

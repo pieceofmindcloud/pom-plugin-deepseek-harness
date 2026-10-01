@@ -8,7 +8,8 @@ type RuntimeStatus = { status: "ready" } | { status: "starting" } | { status: "e
 type Phase = { kind: "starting" } | { kind: "loading" } | { kind: "ready" } | { kind: "error"; message: string };
 
 const POLL_MS = 1000;
-const START_TIMEOUT_MS = 180_000;
+// The first start installs the harness from npm (about 200 MB).
+const START_TIMEOUT_MS = 15 * 60_000;
 
 async function waitUntilReady(signal: AbortSignal): Promise<void> {
   const deadline = Date.now() + START_TIMEOUT_MS;

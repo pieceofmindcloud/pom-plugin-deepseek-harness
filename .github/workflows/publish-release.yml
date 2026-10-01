@@ -28,7 +28,7 @@ on:
         type: string
         default: ''
       dsh_version:
-        description: '@deepseek-ai/dsh npm dist-tag or exact version to bundle (latest, next, 0.1.7-rc.1)'
+        description: '@deepseek-ai/dsh npm dist-tag or exact version the plugin installs and tracks at runtime (latest, next, 0.1.7-rc.1)'
         type: string
         default: latest
       prerelease:

@@ -11,7 +11,7 @@ usage() {
   printf '%s\n' \
     'Usage: scripts/build.sh --platform <linux-x86_64|macos-aarch64|windows-x86_64> [options]' \
     '  --output <dir>        artifact directory (default: dist-release)' \
-    '  --dsh-version <tag>   @deepseek-ai/dsh npm dist-tag or version to bundle (default: latest)' \
+    '  --dsh-version <tag>   @deepseek-ai/dsh npm dist-tag or version the plugin tracks at runtime (default: latest)' \
     '  --debug               build the debug profile'
 }
 

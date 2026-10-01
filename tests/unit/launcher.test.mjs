@@ -110,3 +110,25 @@ test("the default model moves to POM without overriding a real choice", () => {
     "the user picked another provider",
   );
 });
+
+test("dsh 0.1.7 document-relative combo URLs also go under the mount prefix", () => {
+  const html = [
+    '<script>globalThis["__DSH_BOOT__"] = {"entries":[{"id":"@x/a","url":"plugins/??@x/a/client.js&rev=1"},{"id":"@x/b","url":"/plugins/??@x/b/client.js&rev=2"}]}</script>',
+    '<script src="plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=2"></script>',
+    '<script type="module" crossorigin src="./assets/index-A.js"></script>',
+  ].join("\n");
+  const plan = bootPlan(html, "/api/ui/plugins/demo/proxy");
+  assert.equal(plan.steps[1].url, "/api/ui/plugins/demo/proxy/plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=2");
+  assert.equal(plan.steps[2].url, "/api/ui/plugins/demo/proxy/assets/index-A.js");
+  assert.match(plan.steps[0].code, /"url":"\/api\/ui\/plugins\/demo\/proxy\/plugins\/\?\?@x\/a\/client\.js&rev=1"/);
+  assert.match(plan.steps[0].code, /"url":"\/api\/ui\/plugins\/demo\/proxy\/plugins\/\?\?@x\/b\/client\.js&rev=2"/);
+});
+
+test("document.baseURI reads resolve under the POM proxy base", () => {
+  const source = 'const url = new URL(REMOTE_STREAM_MUX_PATH.slice(1), globals.__DSH_TRANSPORT__?.streamBaseUrl ?? document.baseURI);';
+  const rewritten = rewriteScript(source);
+  assert.equal(rewritten, 'const url = new URL(REMOTE_STREAM_MUX_PATH.slice(1), globals.__DSH_TRANSPORT__?.streamBaseUrl ?? (globalThis.__DSH_POM_BASE__ ?? document.baseURI));');
+  const globalThisStub = { __DSH_POM_BASE__: "http://node:8080/api/ui/plugins/deepseek_harness/proxy/" };
+  const url = new URL("api/remote.mux", globalThisStub.__DSH_POM_BASE__);
+  assert.equal(url.pathname, "/api/ui/plugins/deepseek_harness/proxy/api/remote.mux");
+});

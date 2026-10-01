@@ -1,6 +1,6 @@
 {
   "starting": "Iniciando o DeepSeek Harness…",
-  "startingDetail": "A primeira inicialização descompacta o runtime embutido e pode levar um minuto.",
+  "startingDetail": "A primeira inicialização baixa o harness oficial do npm e pode levar alguns minutos. As seguintes só verificam se há uma versão mais nova.",
   "loading": "Carregando o DeepSeek Harness…",
   "failed": "Não foi possível iniciar o DeepSeek Harness",
   "retry": "Tentar de novo"

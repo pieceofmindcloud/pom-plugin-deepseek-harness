@@ -11,7 +11,7 @@ usage() {
   printf '%s\n' \
     'Usage: scripts/package.sh --platform <linux-x86_64|macos-aarch64|windows-x86_64> --version <semver> [options]' \
     '  --output <dir>        package directory (default: dist-release)' \
-    '  --dsh-version <tag>   @deepseek-ai/dsh npm dist-tag or version to bundle (default: latest)'
+    '  --dsh-version <tag>   @deepseek-ai/dsh npm dist-tag or version the plugin tracks at runtime (default: latest)'
 }
 
 die() {

@@ -119,8 +119,11 @@ export function toProxyUrl(input: string | URL, page: Page = location): string |
 
 /** Route every harness request through the POM proxy. */
 function installBridges(): void {
-  const scope = globalThis as typeof globalThis & { __DSH_POM__?: URL };
+  const scope = globalThis as typeof globalThis & { __DSH_POM__?: URL; __DSH_POM_BASE__?: string };
   scope.__DSH_POM__ = new URL(HARNESS_ORIGIN);
+  // Base for URLs the harness resolves against `document.baseURI` (stream
+  // socket, uploads, media); the launcher rewrites those reads to use it.
+  scope.__DSH_POM_BASE__ = `${location.origin}${PROXY_PREFIX}/`;
 
   const nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
@@ -136,6 +139,24 @@ function installBridges(): void {
     constructor(url: string | URL, protocols?: string | string[]) {
       super(toProxyUrl(url), protocols);
     }
+  };
+
+  // Bundles the module loader adds at run time (`<script src="plugins/??...">`,
+  // document-relative since dsh 0.1.7) would resolve against the POM page.
+  const scriptSrc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, "src");
+  if (scriptSrc?.set && scriptSrc.get) {
+    const nativeSet = scriptSrc.set;
+    Object.defineProperty(HTMLScriptElement.prototype, "src", {
+      ...scriptSrc,
+      set(this: HTMLScriptElement, value: string) {
+        nativeSet.call(this, String(toProxyUrl(value)));
+      },
+    });
+  }
+  const nativeSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function setAttribute(this: Element, name: string, value: string) {
+    const mapped = this instanceof HTMLScriptElement && name.toLowerCase() === "src" ? String(toProxyUrl(value)) : value;
+    nativeSetAttribute.call(this, name, mapped);
   };
 
   const NativeEventSource = globalThis.EventSource;

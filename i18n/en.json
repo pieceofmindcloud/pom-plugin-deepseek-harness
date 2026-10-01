@@ -1,6 +1,6 @@
 {
   "starting": "Starting DeepSeek Harness…",
-  "startingDetail": "The first start unpacks the bundled runtime and can take a minute.",
+  "startingDetail": "The first start downloads the official harness from npm and can take a few minutes. Later starts only check for a newer version.",
   "loading": "Loading DeepSeek Harness…",
   "failed": "DeepSeek Harness could not start",
   "retry": "Try again"
