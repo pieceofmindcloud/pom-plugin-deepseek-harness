@@ -72,12 +72,30 @@ async function listPomModels() {
   const headers = { accept: "application/json", authorization: `Bearer ${llmApiKey}` };
   const response = await fetch(`${llmBaseUrl}/models`, { headers, signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`GET ${llmBaseUrl}/models returned HTTP ${response.status}`);
-  const body = await response.json();
+  return parsePomModels(await response.json());
+}
+
+/** Read model limits from the POM's `/v1/models` response. */
+export function parsePomModels(body) {
   const rows = Array.isArray(body?.data) ? body.data : [];
-  return rows
-    .map((row) => (typeof row?.id === "string" ? row.id.trim() : ""))
-    .filter((id, index, ids) => id && ids.indexOf(id) === index)
-    .map((id) => ({ id, name: id }));
+  const models = [];
+  for (const row of rows) {
+    const id = typeof row?.id === "string" ? row.id.trim() : "";
+    if (!id || models.some((model) => model.id === id)) continue;
+    const contextWindow = positiveInt(row.context_length ?? row.max_input_tokens ?? row.top_provider?.context_length);
+    const maxTokens = positiveInt(row.max_tokens ?? row.top_provider?.max_completion_tokens);
+    models.push({
+      id,
+      name: id,
+      ...(contextWindow && { contextWindow }),
+      ...(maxTokens && { maxTokens }),
+    });
+  }
+  return models;
+}
+
+function positiveInt(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 /**
@@ -128,7 +146,7 @@ function writePomPatch(models) {
 
 /** Follow the node's model list for as long as the harness runs. */
 function followPomModels(initial, session) {
-  let known = JSON.stringify(initial.map((model) => model.id));
+  let known = JSON.stringify(initial);
   const timer = setInterval(async () => {
     let models;
     try {
@@ -137,10 +155,10 @@ function followPomModels(initial, session) {
       log(`POM models unavailable: ${error.message}`);
       return;
     }
-    const ids = JSON.stringify(models.map((model) => model.id));
-    if (ids === known) return;
-    known = ids;
-    if (writePomPatch(models)) log(`POM models changed: ${ids}`);
+    const current = JSON.stringify(models);
+    if (current === known) return;
+    known = current;
+    if (writePomPatch(models)) log(`POM models or limits changed: ${JSON.stringify(models.map((model) => model.id))}`);
     await ensureDefaultModel(session, models).catch((error) => log(`default model not updated: ${error.message}`));
   }, MODEL_POLL_MS);
   timer.unref();

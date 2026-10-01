@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bootPlan, defaultModelChange, forwardedPath, mountPrefix, pomPatch, rewriteScript } from "../../runtime/launcher.mjs";
+import { bootPlan, defaultModelChange, forwardedPath, mountPrefix, parsePomModels, pomPatch, rewriteScript } from "../../runtime/launcher.mjs";
 
 test("the forwarded target keeps every byte of the query", () => {
   assert.equal(forwardedPath("/plugins/??@a/b.js,@c/d.js&rev=1"), "/plugins/??@a/b.js,@c/d.js&rev=1");
@@ -52,9 +52,31 @@ test("harness bundles resolve their origin and mount point through the plugin", 
   assert.match(rewritten, /isLoopback: \(globalThis\.__DSH_POM__ !== void 0 \|\| isLoopbackHostname\(pageLocation\.hostname\)\),/);
 });
 
+test("POM model parsing includes valid context and output limits", () => {
+  assert.deepEqual(
+    parsePomModels({
+      data: [
+        { id: " qwen ", context_length: 65536, max_tokens: 8192 },
+        { id: "alias", max_input_tokens: 32768, top_provider: { max_completion_tokens: 4096 } },
+        { id: "pending", context_length: 0, max_tokens: null },
+        { id: "qwen", context_length: 1, max_tokens: 1 },
+        { max_tokens: 20 },
+      ],
+    }),
+    [
+      { id: "qwen", name: "qwen", contextWindow: 65536, maxTokens: 8192 },
+      { id: "alias", name: "alias", contextWindow: 32768, maxTokens: 4096 },
+      { id: "pending", name: "pending" },
+    ],
+  );
+});
+
 test("the live patch carries only the POM route", () => {
   assert.deepEqual(pomPatch([], "http://127.0.0.1:8080/v1"), []);
-  const patch = pomPatch([{ id: "a", name: "a" }, { id: "b", name: "b" }], "http://127.0.0.1:8080/v1");
+  const patch = pomPatch([
+    { id: "a", name: "a", contextWindow: 65536, maxTokens: 8192 },
+    { id: "b", name: "b" },
+  ], "http://127.0.0.1:8080/v1");
   assert.equal(patch.length, 1, "reloading agent-default-model takes the session controller down");
   assert.deepEqual(patch[0], {
     id: "llm-pi-ai",
@@ -65,7 +87,10 @@ test("the live patch carries only the POM route", () => {
           api: "openai-completions",
           baseURL: "http://127.0.0.1:8080/v1",
           apiKeyEnv: "DSH_POM_LLM_API_KEY",
-          models: [{ id: "a", name: "a" }, { id: "b", name: "b" }],
+          models: [
+            { id: "a", name: "a", contextWindow: 65536, maxTokens: 8192 },
+            { id: "b", name: "b" },
+          ],
         },
       },
     },
