@@ -107,7 +107,7 @@ jobs:
               gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "$RELEASE_TAG" --notes "Release $RELEASE_TAG"
             fi
           fi
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber dist-release/pom-plugin-deepseek-harness-${PLATFORM}.*
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber dist-release/pom-plugin-deepseek-harness-${PLATFORM}.* "dist-release/pom-plugin-${PLATFORM}.json"
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ matrix.version }}
