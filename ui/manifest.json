@@ -47,5 +47,17 @@
     "i18n/en.json",
     "i18n/pt-BR.json",
     "ui/icon.png"
-  ]
+  ],
+  "development": {
+    "rebuild": [
+      {
+        "run": ["scripts/dev-ui.sh"],
+        "os": ["linux", "macos"]
+      },
+      {
+        "run": ["scripts/dev-runtime.sh"],
+        "os": ["linux", "macos"]
+      }
+    ]
+  }
 }
