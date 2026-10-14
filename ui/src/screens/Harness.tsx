@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { mountHarness, parkHarness } from "../harness/mount";
 import { getPluginAsset, usePluginI18n } from "../host/runtime";
+import { useScreenReady } from "../host/ready";
 
 /** `ui/runtime.json`: whether the harness is up. The POM proxy knows where it runs. */
 type RuntimeStatus = { status: "ready" } | { status: "starting" } | { status: "error"; error: string };
@@ -50,6 +51,11 @@ export function Harness() {
       parkHarness();
     };
   }, [attempt]);
+
+  // The mounted harness client is the content of this screen: the host opens
+  // it when the client is on screen (or its failure is), not over the
+  // starting/loading spinner.
+  useScreenReady(phase.kind === "ready" || phase.kind === "error");
 
   return (
     <div className="pb-page">
