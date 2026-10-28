@@ -15,13 +15,13 @@
 
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PLUGIN_DIR: &str = "deepseek_harness";
 
@@ -61,7 +61,7 @@ impl Gateway {
 pub enum Status {
     /// Waiting for `host.configure` from the POM.
     Unconfigured,
-    Starting,
+    Starting(Progress),
     Ready {
         port: u16,
         token: String,
@@ -76,7 +76,7 @@ impl Status {
     pub fn to_json(&self) -> Value {
         match self {
             Status::Unconfigured => json!({"status": "starting", "detail": {"waiting": "pom"}}),
-            Status::Starting => json!({"status": "starting"}),
+            Status::Starting(progress) => progress.to_json(),
             Status::Ready { detail, .. } => json!({"status": "ready", "detail": detail}),
             Status::Failed(error) => json!({"status": "error", "error": error}),
         }
@@ -89,7 +89,83 @@ impl Status {
                 json!({"status": "ready", "port": port, "token": token})
             }
             Status::Failed(error) => json!({"status": "error", "error": error}),
-            Status::Unconfigured | Status::Starting => json!({"status": "starting"}),
+            Status::Unconfigured | Status::Starting(_) => json!({"status": "starting"}),
+        }
+    }
+}
+
+/// What a start is doing. `Runtime` writes the bundled runtime out (a new
+/// release), `Package` is the launcher's `npm install` of `@deepseek-ai/dsh`
+/// (the first start, or a newer harness on npm), and `Launch` waits for the
+/// launcher's ready line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Runtime,
+    Package,
+    Launch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Nothing was installed before: the first start of the plugin.
+    Install,
+    /// An older runtime or harness version is replaced.
+    Update,
+}
+
+/// The `npm install` has no measure of its own: the bar eases toward the end
+/// of its share with this time constant and never reaches it.
+const PACKAGE_EASE_SECONDS: f64 = 60.0;
+
+/// Where a start is, for the POM's loader over the screen (`ui/runtime.json`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    pub step: Step,
+    /// Set while this start installs something; `None` is a plain start.
+    pub mode: Option<Mode>,
+    /// Measured share of the step, 0..=1 (the archive bytes unpacked).
+    pub done: f64,
+    pub since: Instant,
+}
+
+impl Progress {
+    pub fn new(step: Step, mode: Option<Mode>) -> Self {
+        Self {
+            step,
+            mode,
+            done: 0.0,
+            since: Instant::now(),
+        }
+    }
+
+    /// The installer bar: the unpack is the first 20% and follows the archive
+    /// bytes; the npm install eases from 20% toward 95% with time.
+    pub fn percent(&self) -> u8 {
+        let value = match self.step {
+            Step::Runtime => self.done.clamp(0.0, 1.0) * 20.0,
+            Step::Package => {
+                let seconds = self.since.elapsed().as_secs_f64();
+                20.0 + 75.0 * (1.0 - (-seconds / PACKAGE_EASE_SECONDS).exp())
+            }
+            Step::Launch => 100.0,
+        };
+        value.floor() as u8
+    }
+
+    fn to_json(&self) -> Value {
+        let step = match self.step {
+            Step::Runtime => "runtime",
+            Step::Package => "package",
+            Step::Launch => "launch",
+        };
+        match self.mode {
+            Some(mode) => json!({
+                "status": "installing",
+                "step": step,
+                "mode": if mode == Mode::Update { "update" } else { "install" },
+                "progress": self.percent(),
+            }),
+            None => json!({"status": "starting", "step": step}),
         }
     }
 }
@@ -127,7 +203,7 @@ impl Supervisor {
         self.status
             .lock()
             .map(|status| status.clone())
-            .unwrap_or(Status::Starting)
+            .unwrap_or(Status::Unconfigured)
     }
 
     fn set_status(&self, generation: u64, status: Status) {
@@ -136,6 +212,18 @@ impl Supervisor {
         }
         if let Ok(mut current) = self.status.lock() {
             *current = status;
+        }
+    }
+
+    /// The measured share of the current step, from the worker of `generation`.
+    fn set_done(&self, generation: u64, done: f64) {
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        if let Ok(mut current) = self.status.lock() {
+            if let Status::Starting(progress) = &mut *current {
+                progress.done = done;
+            }
         }
     }
 
@@ -152,10 +240,31 @@ impl Supervisor {
             }
             *current = Some(gateway.clone());
         }
+        self.start(gateway);
+    }
+
+    /// `rpc.retry`, the loader's "Try again": start again with the last
+    /// configuration. False before the POM configured the plugin. A running
+    /// harness is left alone: a retry never ends live sessions.
+    pub fn retry(self: &Arc<Self>) -> bool {
+        if matches!(self.status(), Status::Ready { .. }) {
+            return true;
+        }
+        let gateway = self.gateway.lock().ok().and_then(|current| current.clone());
+        match gateway {
+            Some(gateway) => {
+                self.start(gateway);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn start(self: &Arc<Self>, gateway: Gateway) {
         self.stop();
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Ok(mut status) = self.status.lock() {
-            *status = Status::Starting;
+            *status = Status::Starting(Progress::new(Step::Launch, None));
         }
         let worker = Arc::clone(self);
         thread::spawn(move || {
@@ -170,7 +279,21 @@ impl Supervisor {
             return Err("this build does not bundle the harness runtime".into());
         }
         let base = plugin_directory()?;
-        let runtime = unpack_runtime(&base.join("runtime"), self.archive, self.checksum)?;
+        let root = base.join("runtime");
+        self.set_status(
+            generation,
+            Status::Starting(Progress::new(
+                Step::Runtime,
+                install_mode(&root, self.checksum),
+            )),
+        );
+        let runtime = unpack_runtime(&root, self.archive, self.checksum, &mut |done| {
+            self.set_done(generation, done)
+        })?;
+        self.set_status(
+            generation,
+            Status::Starting(Progress::new(Step::Launch, None)),
+        );
         let node = runtime
             .join("bin")
             .join(if cfg!(windows) { "node.exe" } else { "node" });
@@ -203,12 +326,21 @@ impl Supervisor {
             *process = Some(Process { child, stdin });
         }
 
-        let mut line = String::new();
-        BufReader::new(stdout)
-            .read_line(&mut line)
-            .map_err(|error| format!("read launcher status: {error}"))?;
-        let reply: Value = serde_json::from_str(line.trim())
-            .map_err(|_| "the harness launcher exited before it was ready".to_owned())?;
+        // Progress lines (`installing`, `starting`) come before the one
+        // `ready` or `error` line.
+        let mut stdout = BufReader::new(stdout);
+        let reply = loop {
+            let mut line = String::new();
+            stdout
+                .read_line(&mut line)
+                .map_err(|error| format!("read launcher status: {error}"))?;
+            let reply: Value = serde_json::from_str(line.trim())
+                .map_err(|_| "the harness launcher exited before it was ready".to_owned())?;
+            match launcher_progress(&reply) {
+                Some(progress) => self.set_status(generation, Status::Starting(progress)),
+                None => break reply,
+            }
+        };
         match reply["status"].as_str() {
             Some("ready") => {
                 let port = reply["port"]
@@ -297,17 +429,79 @@ fn plugin_directory() -> Result<PathBuf, String> {
     Ok(parent.join(PLUGIN_DIR))
 }
 
+/// A launcher progress line: `{"status": "installing", "step": "package",
+/// "mode": "install"|"update"}` before the npm install, `{"status":
+/// "starting"}` after it. `None` for the final `ready` or `error` line.
+pub fn launcher_progress(line: &Value) -> Option<Progress> {
+    match line["status"].as_str() {
+        Some("installing") => {
+            let mode = if line["mode"] == "update" {
+                Mode::Update
+            } else {
+                Mode::Install
+            };
+            Some(Progress::new(Step::Package, Some(mode)))
+        }
+        Some("starting") => Some(Progress::new(Step::Launch, None)),
+        _ => None,
+    }
+}
+
+/// `None` when the runtime of `checksum` is already unpacked; otherwise
+/// whether this start installs the plugin or replaces an older release.
+pub fn install_mode(root: &Path, checksum: &str) -> Option<Mode> {
+    if runtime_dir(root, checksum).join("launcher.mjs").is_file() {
+        return None;
+    }
+    let older = fs::read_dir(root).ok().is_some_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+    });
+    Some(if older { Mode::Update } else { Mode::Install })
+}
+
+fn runtime_dir(root: &Path, checksum: &str) -> PathBuf {
+    root.join(&checksum[..checksum.len().min(16)])
+}
+
+/// Reads the archive and reports the share of its bytes read so far.
+struct Counting<'a, 'b> {
+    archive: &'a [u8],
+    read: usize,
+    report: &'b mut dyn FnMut(f64),
+}
+
+impl Read for Counting<'_, '_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = (&self.archive[self.read..]).read(buffer)?;
+        self.read += count;
+        (self.report)(self.read as f64 / self.archive.len().max(1) as f64);
+        Ok(count)
+    }
+}
+
 /// Unpack once per archive checksum, atomically, and drop older runtimes.
-pub fn unpack_runtime(root: &Path, archive: &[u8], checksum: &str) -> Result<PathBuf, String> {
+/// `report` follows the share of the archive unpacked.
+pub fn unpack_runtime(
+    root: &Path,
+    archive: &[u8],
+    checksum: &str,
+    report: &mut dyn FnMut(f64),
+) -> Result<PathBuf, String> {
     let id = &checksum[..checksum.len().min(16)];
-    let target = root.join(id);
+    let target = runtime_dir(root, checksum);
     if target.join("launcher.mjs").is_file() {
         return Ok(target);
     }
     fs::create_dir_all(root).map_err(|error| format!("{}: {error}", root.display()))?;
     let partial = root.join(format!(".{id}.partial"));
     let _ = fs::remove_dir_all(&partial);
-    let mut unpacker = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    let mut unpacker = tar::Archive::new(flate2::read::GzDecoder::new(Counting {
+        archive,
+        read: 0,
+        report,
+    }));
     unpacker.set_preserve_permissions(true);
     unpacker
         .unpack(&partial)
@@ -351,12 +545,24 @@ mod tests {
         let persistent_runtime = test_root.join("data/dsh-home/runtime");
         fs::create_dir_all(&persistent_runtime).unwrap();
         fs::write(persistent_runtime.join("user-data.json"), b"keep me").unwrap();
-        let path = unpack_runtime(&root, &first, &"a".repeat(64)).unwrap();
+        assert_eq!(install_mode(&root, &"a".repeat(64)), Some(Mode::Install));
+        let mut shares = Vec::new();
+        let path = unpack_runtime(&root, &first, &"a".repeat(64), &mut |done| {
+            shares.push(done)
+        })
+        .unwrap();
+        assert_eq!(shares.last(), Some(&1.0));
+        assert!(shares.windows(2).all(|pair| pair[0] <= pair[1]));
         assert_eq!(fs::read(path.join("launcher.mjs")).unwrap(), b"// one");
-        assert_eq!(unpack_runtime(&root, &[], &"a".repeat(64)).unwrap(), path);
+        assert_eq!(install_mode(&root, &"a".repeat(64)), None);
+        assert_eq!(
+            unpack_runtime(&root, &[], &"a".repeat(64), &mut |_| {}).unwrap(),
+            path
+        );
 
         let second = archive_with(&[("launcher.mjs", b"// two")]);
-        let next = unpack_runtime(&root, &second, &"b".repeat(64)).unwrap();
+        assert_eq!(install_mode(&root, &"b".repeat(64)), Some(Mode::Update));
+        let next = unpack_runtime(&root, &second, &"b".repeat(64), &mut |_| {}).unwrap();
         assert_eq!(fs::read(next.join("launcher.mjs")).unwrap(), b"// two");
         assert!(!path.exists());
         assert_eq!(
@@ -367,8 +573,39 @@ mod tests {
     }
 
     #[test]
+    fn launcher_progress_lines_come_before_the_final_line() {
+        let installing = launcher_progress(
+            &json!({"status": "installing", "step": "package", "mode": "update"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (installing.step, installing.mode),
+            (Step::Package, Some(Mode::Update))
+        );
+        let percent = installing.percent();
+        assert!((20..95).contains(&percent), "{percent}");
+        let starting = launcher_progress(&json!({"status": "starting"})).unwrap();
+        assert_eq!((starting.step, starting.mode), (Step::Launch, None));
+        assert!(launcher_progress(&json!({"status": "ready", "port": 1})).is_none());
+        assert!(launcher_progress(&json!({"status": "error", "error": "x"})).is_none());
+    }
+
+    #[test]
     fn runtime_status_never_exposes_the_upstream_token() {
-        assert_eq!(Status::Starting.to_json(), json!({"status": "starting"}));
+        assert_eq!(
+            Status::Starting(Progress::new(Step::Launch, None)).to_json(),
+            json!({"status": "starting", "step": "launch"})
+        );
+        let mut unpacking = Progress::new(Step::Runtime, Some(Mode::Install));
+        unpacking.done = 0.5;
+        assert_eq!(
+            Status::Starting(unpacking).to_json(),
+            json!({"status": "installing", "step": "runtime", "mode": "install", "progress": 10})
+        );
+        assert_eq!(
+            Status::Starting(Progress::new(Step::Launch, None)).upstream_json(),
+            json!({"status": "starting"})
+        );
         assert_eq!(Status::Unconfigured.to_json()["status"], "starting");
         assert_eq!(
             Status::Failed("boom".into()).to_json(),

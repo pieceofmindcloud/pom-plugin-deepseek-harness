@@ -44,8 +44,10 @@ test("a dist-tag resolves through the registry and an exact version does not", a
 test("the first start installs the resolved version and marks it complete", () =>
   withRoot(async (root) => {
     const installed = [];
-    const dsh = await ensureDsh({ root, track: "latest", log: quiet, resolve: async () => "0.1.7-rc.2", install: fakeInstall(installed) });
+    const modes = [];
+    const dsh = await ensureDsh({ root, track: "latest", log: quiet, resolve: async () => "0.1.7-rc.2", install: fakeInstall(installed), onInstall: (mode) => modes.push(mode) });
     assert.deepEqual(installed, ["0.1.7-rc.2"]);
+    assert.deepEqual(modes, ["install"]);
     assert.equal(dsh.version, "0.1.7-rc.2");
     assert.ok(dsh.bin.endsWith(join("0.1.7-rc.2", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")));
     assert.deepEqual(installedVersions(root), ["0.1.7-rc.2"]);
@@ -55,9 +57,13 @@ test("a newer tagged version replaces the installed one; the same version is not
   withRoot(async (root) => {
     complete(root, "0.1.5-rc.3");
     const installed = [];
-    await ensureDsh({ root, track: "latest", log: quiet, resolve: async () => "0.1.5-rc.3", install: fakeInstall(installed) });
+    const modes = [];
+    const onInstall = (mode) => modes.push(mode);
+    await ensureDsh({ root, track: "latest", log: quiet, resolve: async () => "0.1.5-rc.3", install: fakeInstall(installed), onInstall });
     assert.deepEqual(installed, []);
-    const dsh = await ensureDsh({ root, track: "latest", log: quiet, resolve: async () => "0.2.0", install: fakeInstall(installed) });
+    assert.deepEqual(modes, []);
+    const dsh = await ensureDsh({ root, track: "latest", log: quiet, resolve: async () => "0.2.0", install: fakeInstall(installed), onInstall });
+    assert.deepEqual(modes, ["update"]);
     assert.equal(dsh.version, "0.2.0");
     assert.deepEqual(readdirSync(root), ["0.2.0"]);
   }));

@@ -3,5 +3,10 @@
   "startingDetail": "A primeira inicialização baixa o harness oficial do npm e pode levar alguns minutos. As seguintes só verificam se há uma versão mais nova.",
   "loading": "Carregando o DeepSeek Harness…",
   "failed": "Não foi possível iniciar o DeepSeek Harness",
-  "retry": "Tentar de novo"
+  "retry": "Tentar de novo",
+  "loader.installing": "Instalando o DeepSeek Harness",
+  "loader.updating": "Atualizando o DeepSeek Harness",
+  "step.runtime": "Descompactando o Node.js e o launcher",
+  "step.package": "Baixando o harness do npm",
+  "step.launch": "Iniciando o DeepSeek Harness"
 }

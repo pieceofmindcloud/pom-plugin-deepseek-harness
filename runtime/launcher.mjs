@@ -16,9 +16,11 @@
 // - the harness mount point `#root` becomes `#dsh-root` (the POM owns #root);
 // - the harness browser session is established here, server side.
 //
-// Protocol with the plugin library: exactly one JSON line on stdout once
+// Protocol with the plugin library: one final JSON line on stdout once
 // ready (`{"status":"ready","port":N,"token":"..."}`) or failed
-// (`{"status":"error","error":"..."}`). Logs go to stderr. The process exits
+// (`{"status":"error","error":"..."}`), after optional progress lines around
+// the npm install (`{"status":"installing","step":"package","mode":...}`, then
+// `{"status":"starting"}`). Logs go to stderr. The process exits
 // when stdin closes, so it never outlives the plugin host.
 
 import { spawn } from "node:child_process";
@@ -62,6 +64,11 @@ function report(value) {
   if (reported) return;
   reported = true;
   process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+/** A progress line for the plugin's loader; the one `report` line comes last. */
+function progress(value) {
+  if (!reported) process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function fail(error) {
@@ -489,7 +496,9 @@ async function main() {
     npmCli: join(here, "npm", "bin", "npm-cli.js"),
     cacheDir: join(dataDir, "cache", "npm"),
     log,
+    onInstall: (mode) => progress({ status: "installing", step: "package", mode }),
   });
+  progress({ status: "starting" });
   log(`using @deepseek-ai/dsh@${dsh.version}`);
   writePomPatch(models);
   const harness = await startHarness(writeOverlay(), dsh.bin);

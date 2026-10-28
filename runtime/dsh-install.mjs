@@ -119,9 +119,10 @@ function slim(directory, keepPty) {
 
 /**
  * Make sure a harness install is ready and return its CLI entry point.
- * `install` defaults to `npmInstall`; tests pass a stub.
+ * `install` defaults to `npmInstall`; tests pass a stub. `onInstall` hears
+ * `"install"` (nothing installed yet) or `"update"` before an npm install.
  */
-export async function ensureDsh({ root, track, keepPty, log, resolve = resolveDshVersion, install, ...npm }) {
+export async function ensureDsh({ root, track, keepPty, log, resolve = resolveDshVersion, install, onInstall, ...npm }) {
   mkdirSync(root, { recursive: true });
   const installed = installedVersions(root);
   let version;
@@ -140,6 +141,7 @@ export async function ensureDsh({ root, track, keepPty, log, resolve = resolveDs
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
     try {
+      onInstall?.(installed.length === 0 ? "install" : "update");
       await (install ?? npmInstall)({ directory, version, log, ...npm });
       slim(directory, keepPty);
       writeFileSync(join(directory, MARKER), `${new Date().toISOString()}\n`);
